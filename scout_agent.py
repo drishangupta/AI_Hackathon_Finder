@@ -8,6 +8,8 @@ import boto3
 import json
 from typing import Dict, List, Optional
 from strands import Agent, tool
+from docker.errors import ContainerError, ImageNotFound
+from botocore.exceptions import ClientError # For other boto errors
 
 
 class ScoutAgent(Agent):
@@ -93,7 +95,7 @@ class ScoutAgent(Agent):
         if 'Item' in existing:
             return existing['Item']
         
-        # Generate new tool using Claude 3 Sonnet
+        # Generate new tool using Claude 4.5 Sonnet
         prompt = f"""
         Analyze this website: {url}
         
@@ -101,10 +103,12 @@ class ScoutAgent(Agent):
         If APIs found, return extraction code using requests.
         If no APIs, generate a BeautifulSoup scraper.
         
-        Return only executable Python code as a function named 'extract_hackathons'.
+        Return *only* the executable Python code as a function named 'extract_hackathons'.
+        The function must take 'url' as an argument, e.g., 'def extract_hackathons(url):'.
+        Your code *must* import its own dependencies (e.g., requests, BeautifulSoup).
         """
         
-        response = self.bedrock.invoke_model(
+        response = self.bedrock_runtime.invoke_model(
             modelId='anthropic.claude-sonnet-4-5-20250929-v1:0',
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
@@ -128,9 +132,46 @@ class ScoutAgent(Agent):
     
     def _execute_extraction_tool(self, url: str, tool_data: Dict) -> List[Dict]:
         """Execute the generated extraction tool"""
-        # Execute the generated code safely
-        exec(tool_data['scraper_code'])
-        return locals()['extract_hackathons'](url)
+        # Execute the generated code safely in a docker container
+        try:
+            # 1. Run the container
+            container = self.docker_client.containers.run(
+                image="scout-executor:latest",  # The image we built
+                environment={
+                    "SCRAPER_CODE": tool_data['scraper_code'],
+                    "TARGET_URL": url
+                },
+                
+                # --- SECURITY & RESOURCE LIMITS ---
+                remove=True,        # Automatically remove container on exit
+                detach=False,       # Run in foreground and wait for completion
+                network_mode="bridge", # Isolates from host network
+                mem_limit="256m",   # Max 256MB of RAM
+                cpu_period=100000,  # CPU limiting (100ms)
+                cpu_quota=50000,    # 50% CPU max
+                read_only=True      # Read-only filesystem
+            )
+            
+            # 2. 'container' holds the stdout logs (as bytes)
+            #    because detach=False blocks until completion
+            stdout = container.decode('utf-8')
+            
+            # 3. Parse the JSON output from the container's stdout
+            return json.loads(stdout)
+
+        except ImageNotFound:
+            print("Error: 'scout-executor:latest' image not found. Please build it.")
+            return [{"error": "Executor image not found"}]
+        except ContainerError as e:
+            # This catches errors *from inside* the container (e.g., non-zero exit code)
+            print(f"Container failed for {url}:\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}")
+            return [{"error": f"Container failed: {e.stderr.decode('utf-8')}"}]
+        except json.JSONDecodeError as e:
+            print(f"Failed to decode container output for {url}. Output: {stdout}")
+            return [{"error": f"JSON decode error: {e}"}]
+        except Exception as e:
+            print(f"An unexpected error occurred during Docker execution: {e}")
+            return [{"error": f"Docker execution failed: {str(e)}"}]
     
     def _generate_embedding(self, text: str) -> List[float]:
         """Generate embedding using Amazon Titan"""
