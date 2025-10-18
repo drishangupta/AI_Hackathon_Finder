@@ -1,0 +1,27 @@
+TRUSTED HACKATHON SOURCES
+
+Primary Platforms:
+- DevPost (https://devpost.com) - Major hackathon platform with API endpoints
+- HackerEarth (https://hackerearth.com) - Global hackathon competitions
+- MLH (https://mlh.io) - Major League Hacking official events
+
+University Platforms:
+- HackMIT (https://hackmit.org)
+- TreeHacks Stanford (https://treehacks.com)
+- PennApps (https://pennapps.com)
+
+Corporate Hackathons:
+- Google Developer Challenge (https://developers.google.com)
+- Microsoft Imagine Cup (https://imaginecup.microsoft.com)
+- AWS DeepRacer (https://aws.amazon.com/deepracer)
+
+Regional Platforms:
+- AngelHack (https://angelhack.com)
+- Junction (https://junction.fi)
+- Hack the North (https://hackthenorth.com)
+
+API Discovery Patterns:
+- Look for /api/ endpoints in JavaScript
+- Check for GraphQL at /graphql
+- Search for AJAX calls in network tab
+- Find JSON responses in XHR requests

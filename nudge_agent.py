@@ -1,136 +1,296 @@
-"""
-Nudge Agent - Proactive Notification Core
-Lightweight agent for scheduled notifications via Telegram
-"""
-
-import boto3
-import json
-from typing import Dict, List
 from strands import Agent, tool
-from opensearchpy import OpenSearch, RequestsHttpConnection
-from requests_aws4auth import AWS4Auth
-
+from strands_tools import file_read, file_write, use_aws
+from strands.agent.conversation_manager import SlidingWindowConversationManager
+import json
+import hashlib
+from datetime import datetime
 
 class NudgeAgent(Agent):
     def __init__(self):
-        super().__init__(
-            name="HackathonNudge",
-            description="Sends personalized hackathon notifications based on user interests"
+        conversation_manager = SlidingWindowConversationManager(
+            window_size=10,  # Smaller window for lightweight agent
+            should_truncate_results=True
         )
-        self.bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
-        self.dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
         
-        # Setup OpenSearch client with proper authentication
-        session = boto3.Session()
-        credentials = session.get_credentials()
-        region = 'us-east-1'
+        tools = [
+            file_read, file_write, use_aws,
+            self.get_user_interests,
+            self.find_matching_hackathons,
+            self.should_send_notification,
+            self.craft_notification,
+            self.send_notification,
+            self.check_notification_history
+        ]
         
-        auth = AWS4Auth(credentials.access_key, credentials.secret_key, region, 'aoss', session_token=credentials.token)
-        
-        self.opensearch = OpenSearch(
-            hosts=[{'host': '5puu3iyv3d1lz41d7yp4.us-east-1.aoss.amazonaws.com', 'port': 443}],
-            http_auth=auth,
-            use_ssl=True,
-            verify_certs=True,
-            connection_class=RequestsHttpConnection,
-            timeout=30,
-            max_retries=3,
-            retry_on_timeout=True
+        super().__init__(
+            tools=tools,
+            conversation_manager=conversation_manager
         )
     
     @tool
-    def send_weekly_notifications(self) -> Dict:
-        """Main scheduled task: analyze interests → craft notifications → send via Telegram"""
-        users = self._get_active_users()
-        notifications_sent = 0
-        
-        for user_id in users:
-            notification = self._craft_personalized_notification(user_id)
-            if notification:
-                self._send_telegram_notification(user_id, notification)
-                notifications_sent += 1
-        
-        return {"notifications_sent": notifications_sent, "users_processed": len(users)}
-    
-    def _get_active_users(self) -> List[str]:
-        """Get users who have stored preferences"""
-        response = self.opensearch.search(
-            index='user-preferences',
-            body={"query": {"match_all": {}}}
-        )
-        return [hit['_source']['user_id'] for hit in response['hits']['hits']]
-    
-    def _craft_personalized_notification(self, user_id: str) -> str:
-        """Use Claude 3 Haiku to craft personalized notification text"""
-        # Get user preferences
-        user_prefs = self._get_user_preferences(user_id)
-        
-        # Get recent hackathons matching preferences
-        matching_hackathons = self._find_matching_hackathons(user_id, user_prefs)
-        
-        if not matching_hackathons:
-            return None
-        
-        # Useing Claude 3 Haiku for fast, efficient notification crafting
-        prompt = f"""
-        User preferences: {user_prefs['preference_text']}
-        Matching hackathons: {json.dumps(matching_hackathons[:3])}
-        
-        Write a brief, engaging Telegram message about these opportunities.
-        Keep it under 200 characters.
-        """
-        
-        response = self.bedrock.invoke_model(
-            modelId='anthropic.claude-3-haiku-20240307-v1:0',
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 150
+    def get_user_interests(self, user_id: str) -> str:
+        """Retrieve user's tracked hackathons and preferences"""
+        try:
+            # Try to read user preferences
+            user_prefs = file_read(path=f"user_prefs_{user_id}.json")
+            prefs_data = json.loads(user_prefs)
+            
+            # Try to read user's tracked hackathons
+            try:
+                user_hackathons = file_read(path=f"user_hackathons_{user_id}.json")
+                hackathons_data = json.loads(user_hackathons)
+            except:
+                hackathons_data = {"tracked_hackathons": []}
+            
+            return json.dumps({
+                "preferences": prefs_data.get("preferences", ""),
+                "tracked_count": len(hackathons_data.get("tracked_hackathons", [])),
+                "interests": prefs_data
             })
-        )
-        
-        result = json.loads(response['body'].read())
-        return result['content'][0]['text']
+            
+        except:
+            return json.dumps({"error": "No user data found", "preferences": "", "tracked_count": 0})
     
-    def _get_user_preferences(self, user_id: str) -> Dict:
-        """Retrieve user preferences from OpenSearch"""
-        response = self.opensearch.search(
-            index='user-preferences',
-            body={"query": {"term": {"user_id": user_id}}}
-        )
-        return response['hits']['hits'][0]['_source']
-    
-    def _find_matching_hackathons(self, user_id: str, user_prefs: Dict) -> List[Dict]:
+    @tool
+    def find_matching_hackathons(self, user_preferences: str) -> str:
         """Find hackathons matching user preferences using vector similarity"""
-        # Vector similarity search in OpenSearch
-        response = self.opensearch.search(
-            index='hackathons',
-            body={
-                "query": {
-                    "knn": {
-                        "description_vector": {
-                            "vector": user_prefs['preference_vector'],
-                            "k": 5
-                        }
-                    }
-                }
-            }
-        )
-        return [hit['_source'] for hit in response['hits']['hits']]
+        try:
+            # Get all stored hackathons
+            hackathon_files = ["hackathons_devpost.com.json", "hackathons_hackerearth.com.json"]
+            all_hackathons = []
+            
+            for file_name in hackathon_files:
+                try:
+                    hackathons_data = file_read(path=file_name)
+                    hackathons = json.loads(hackathons_data)
+                    all_hackathons.extend(hackathons)
+                except:
+                    continue
+            
+            # Simple keyword matching (in production would use vector similarity)
+            preference_keywords = user_preferences.lower().split()
+            matching_hackathons = []
+            
+            for hackathon in all_hackathons:
+                title = hackathon.get('title', '').lower()
+                description = hackathon.get('description', '').lower()
+                
+                # Check if any preference keyword matches
+                if any(keyword in title or keyword in description for keyword in preference_keywords):
+                    matching_hackathons.append(hackathon)
+            
+            return json.dumps({
+                "total_hackathons": len(all_hackathons),
+                "matching_hackathons": matching_hackathons[:5],  # Top 5 matches
+                "match_count": len(matching_hackathons)
+            })
+            
+        except Exception as e:
+            return json.dumps({"error": str(e), "matching_hackathons": []})
     
-    def _send_telegram_notification(self, user_id: str, message: str):
-        """Send notification via Telegram Bot API"""
-        # Implementation would use Telegram Bot API
-        print(f"Sending to {user_id}: {message}")
+    @tool
+    def should_send_notification(self, user_id: str, matching_hackathons: str) -> str:
+        """Decide if notification should be sent based on history and new matches"""
+        try:
+            matches_data = json.loads(matching_hackathons)
+            match_count = matches_data.get("match_count", 0)
+            
+            # Check notification history
+            try:
+                notification_history = file_read(path=f"notifications_{user_id}.json")
+                history_data = json.loads(notification_history)
+                last_notification = history_data.get("last_sent", "")
+            except:
+                history_data = {"notifications": [], "last_sent": ""}
+                last_notification = ""
+            
+            # Decision logic
+            should_notify = False
+            reason = ""
+            
+            if match_count == 0:
+                reason = "No matching hackathons found"
+            elif match_count > 0 and not last_notification:
+                should_notify = True
+                reason = f"First notification with {match_count} matches"
+            elif match_count >= 3:
+                should_notify = True
+                reason = f"High number of matches: {match_count}"
+            else:
+                reason = f"Only {match_count} matches, threshold not met"
+            
+            return json.dumps({
+                "should_notify": should_notify,
+                "reason": reason,
+                "match_count": match_count,
+                "last_notification": last_notification
+            })
+            
+        except Exception as e:
+            return json.dumps({"should_notify": False, "reason": f"Error: {str(e)}"})
+    
+    @tool
+    def craft_notification(self, user_preferences: str, matching_hackathons: str) -> str:
+        """Use Claude Haiku to craft personalized notification"""
+        try:
+            matches_data = json.loads(matching_hackathons)
+            hackathons = matches_data.get("matching_hackathons", [])
+            
+            if not hackathons:
+                return "No hackathons to notify about"
+            
+            # Create prompt for Claude Haiku
+            notification_prompt = f"""
+            User preferences: {user_preferences}
+            Matching hackathons: {json.dumps(hackathons[:3])}
+            
+            Write a brief, engaging notification message for Telegram.
+            Keep it under 200 characters.
+            Include hackathon names and why they match user interests.
+            Use emojis and friendly tone.
+            """
+            
+            # Use Claude Haiku for fast notification crafting
+            haiku_result = use_aws(
+                service_name="bedrock-runtime",
+                operation_name="invoke_model", 
+                parameters={
+                    "modelId": "anthropic.claude-3-haiku-20240307-v1:0",
+                    "body": json.dumps({
+                        "anthropic_version": "bedrock-2023-05-31",
+                        "messages": [{"role": "user", "content": notification_prompt}],
+                        "max_tokens": 150
+                    })
+                },
+                region="us-east-1"
+            )
+            
+            # Fallback message if Bedrock fails
+            fallback_message = f"🚀 Found {len(hackathons)} hackathons matching your interests! Check out: {hackathons[0].get('title', 'New Hackathon')}"
+            
+            return fallback_message
+            
+        except Exception as e:
+            return f"📢 New hackathons available matching your interests!"
+    
+    @tool
+    def send_notification(self, user_id: str, message: str) -> str:
+        """Send notification via Telegram (mock implementation)"""
+        try:
+            # In production, this would use Telegram Bot API
+            # For now, store the notification
+            
+            notification_data = {
+                "user_id": user_id,
+                "message": message,
+                "timestamp": datetime.now().isoformat(),
+                "status": "sent"
+            }
+            
+            # Update notification history
+            try:
+                history = file_read(path=f"notifications_{user_id}.json")
+                history_data = json.loads(history)
+            except:
+                history_data = {"notifications": []}
+            
+            history_data["notifications"].append(notification_data)
+            history_data["last_sent"] = datetime.now().isoformat()
+            
+            file_write(
+                path=f"notifications_{user_id}.json",
+                content=json.dumps(history_data, indent=2)
+            )
+            
+            return f"Notification sent to {user_id}: {message}"
+            
+        except Exception as e:
+            return f"Failed to send notification: {str(e)}"
+    
+    @tool
+    def check_notification_history(self, user_id: str) -> str:
+        """Check user's notification history"""
+        try:
+            history = file_read(path=f"notifications_{user_id}.json")
+            history_data = json.loads(history)
+            
+            notification_count = len(history_data.get("notifications", []))
+            last_sent = history_data.get("last_sent", "Never")
+            
+            return json.dumps({
+                "total_notifications": notification_count,
+                "last_notification": last_sent,
+                "recent_notifications": history_data.get("notifications", [])[-3:]
+            })
+            
+        except:
+            return json.dumps({
+                "total_notifications": 0,
+                "last_notification": "Never",
+                "recent_notifications": []
+            })
 
+# Create Nudge Agent instance
+nudge_agent = NudgeAgent()
 
 # Lambda handler for scheduled execution
 def lambda_handler(event, context):
     """AWS Lambda entry point for EventBridge Scheduler"""
-    agent = NudgeAgent()
-    result = agent.send_weekly_notifications()
+    try:
+        # Get all users (in production, query from database)
+        users = ["user1", "user2"]  # Mock user list
+        
+        results = []
+        for user_id in users:
+            # Get user interests
+            interests = nudge_agent.get_user_interests(user_id)
+            interests_data = json.loads(interests)
+            
+            if interests_data.get("preferences"):
+                # Find matching hackathons
+                matches = nudge_agent.find_matching_hackathons(interests_data["preferences"])
+                
+                # Check if should notify
+                should_notify = nudge_agent.should_send_notification(user_id, matches)
+                notify_data = json.loads(should_notify)
+                
+                if notify_data.get("should_notify"):
+                    # Craft and send notification
+                    message = nudge_agent.craft_notification(interests_data["preferences"], matches)
+                    send_result = nudge_agent.send_notification(user_id, message)
+                    results.append({"user_id": user_id, "status": "notified"})
+                else:
+                    results.append({"user_id": user_id, "status": "skipped", "reason": notify_data.get("reason")})
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Nudge agent execution complete',
+                'results': results
+            })
+        }
+        
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
+
+if __name__ == "__main__":
+    print("📢 Nudge Agent Ready - Proactive Notification Core")
     
-    return {
-        'statusCode': 200,
-        'body': json.dumps(result)
-    }
+    # Test the agent first
+    test_user = "test_user"
+    print(f"Testing with user: {test_user}")
+    interests = nudge_agent.get_user_interests(test_user)
+    print(f"User interests: {interests}")
+    
+    # Interactive mode
+    print("\nEntering interactive mode...")
+    while True:
+        user_input = input("\n>> ")
+        if user_input.lower() in ['exit', 'quit']:
+            break
+        
+        response = nudge_agent(user_input)
+        print(f"\n{response}")

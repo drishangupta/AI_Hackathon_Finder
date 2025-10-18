@@ -1,0 +1,180 @@
+{
+  "summary": "AI and Blockchain Hackathons - October 2025",
+  "total_hackathons": 13,
+  "ai_hackathons": 10,
+  "blockchain_hackathons": 3,
+  "platforms": ["Devpost", "HackerEarth"],
+  "scraped_at": "2025-10-18T15:50:00Z",
+  
+  "urgent_opportunities": [
+    {
+      "title": "AWS AI Agent Global Hackathon",
+      "platform": "Devpost",
+      "prize": "$45,000",
+      "deadline": "Oct 20, 2025",
+      "time_left": "2 days left",
+      "focus": "AI Agents, DevOps, Enterprise",
+      "registrations": 9189,
+      "url": "https://aws-agent-hackathon.devpost.com/",
+      "urgency": "CRITICAL"
+    },
+    {
+      "title": "AI Accelerate: Unlocking New Frontiers",
+      "platform": "Devpost",
+      "organization": "Google",
+      "prize": "$50,000",
+      "deadline": "Oct 24, 2025",
+      "time_left": "6 days left",
+      "focus": "AI, Databases, Open Ended",
+      "registrations": 2624,
+      "featured": true,
+      "url": "https://ai-accelerate.devpost.com/",
+      "urgency": "HIGH"
+    }
+  ],
+
+  "ai_hackathons": [
+    {
+      "title": "Google Chrome Built-in AI Challenge 2025",
+      "platform": "Devpost",
+      "organization": "Google",
+      "prize": "$70,000",
+      "deadline": "Nov 01, 2025",
+      "time_left": "14 days left",
+      "focus": "Browser AI, Web Development, Beginner Friendly",
+      "registrations": 11418,
+      "url": "https://googlechromeai2025.devpost.com/",
+      "note": "Most popular AI hackathon!"
+    },
+    {
+      "title": "ARM AI Developer Challenge",
+      "platform": "Devpost",
+      "organization": "ARM",
+      "prize": "$15,000",
+      "deadline": "Dec 04, 2025",
+      "time_left": "2+ months left",
+      "focus": "IoT AI, Mobile AI",
+      "registrations": 419,
+      "featured": true,
+      "url": "https://arm-ai-developer-challenge.devpost.com/",
+      "note": "Less crowded, good opportunity"
+    },
+    {
+      "title": "Agentic AI Unleashed: AWS & NVIDIA Hackathon",
+      "platform": "Devpost",
+      "organization": "AWS & NVIDIA",
+      "prize": "Non-cash prizes",
+      "deadline": "Nov 03, 2025",
+      "time_left": "16 days left",
+      "focus": "AI Agents, Enterprise AI, DevOps",
+      "registrations": 1169,
+      "url": "https://nvidia-aws.devpost.com/"
+    },
+    {
+      "title": "Cloud Run Hackathon",
+      "platform": "Devpost",
+      "organization": "Google",
+      "prize": "$50,000",
+      "deadline": "Nov 10, 2025",
+      "time_left": "23 days left",
+      "focus": "Machine Learning/AI, Low/No Code",
+      "registrations": 1343,
+      "url": "https://run.devpost.com/"
+    },
+    {
+      "title": "Rift Rewind Hackathon",
+      "platform": "Devpost",
+      "organization": "Amazon",
+      "prize": "$26,000",
+      "deadline": "Nov 10, 2025",
+      "time_left": "23 days left",
+      "focus": "Machine Learning/AI, Databases, Gaming",
+      "registrations": 1759,
+      "url": "https://riftrewind.devpost.com/"
+    },
+    {
+      "title": "Chroma Awards: AI Film, Music Videos, and Games",
+      "platform": "Devpost",
+      "organization": "ElevenLabs",
+      "prize": "$176,500",
+      "deadline": "Nov 18, 2025",
+      "time_left": "about 1 month left",
+      "focus": "AI in Creative Content, Gaming, Music/Art",
+      "registrations": 2771,
+      "url": "https://chromaawards.devpost.com/",
+      "note": "Huge prize pool for creative AI!"
+    },
+    {
+      "title": "Agent.ai Hackathon",
+      "platform": "HackerEarth",
+      "registrations": 33670,
+      "deadline": "Dec 21, 2025",
+      "focus": "AI Agents",
+      "url": "https://www.hackerearth.com/agent-ai",
+      "note": "Most popular AI hackathon on HackerEarth!"
+    },
+    {
+      "title": "Edge AI contest by Edge Impulse",
+      "platform": "HackerEarth",
+      "organization": "Edge Impulse",
+      "start_date": "Oct 30, 2025",
+      "status": "upcoming",
+      "registrations": 795,
+      "focus": "Edge AI, IoT",
+      "url": "https://www.hackerearth.com/edge-impulse"
+    }
+  ],
+
+  "blockchain_hackathons": [
+    {
+      "title": "Build Resilient Apps with Polkadot Cloud",
+      "platform": "Devpost",
+      "organization": "POLKADOT",
+      "prize": "$40,000",
+      "deadline": "Nov 17, 2025",
+      "time_left": "about 1 month left",
+      "focus": "Blockchain, Web3, Beginner Friendly",
+      "registrations": 1780,
+      "url": "https://polkadot.devpost.com/"
+    },
+    {
+      "title": "QIE Blockchain Hackathon 2025",
+      "platform": "HackerEarth",
+      "organization": "QIE Wallet",
+      "registrations": 351,
+      "deadline": "Dec 15, 2025",
+      "focus": "Blockchain, Wallet Technology",
+      "url": "https://qie-blockchain-hackathon.hackerearth.com/",
+      "status": "live"
+    }
+  ],
+
+  "recommendations_by_interest": {
+    "ai_beginners": [
+      "Google Chrome Built-in AI Challenge 2025",
+      "ARM AI Developer Challenge",
+      "Cloud Run Hackathon"
+    ],
+    "ai_advanced": [
+      "AWS AI Agent Global Hackathon",
+      "Agentic AI Unleashed: AWS & NVIDIA",
+      "Agent.ai Hackathon"
+    ],
+    "creative_ai": [
+      "Chroma Awards: AI Film, Music Videos, and Games"
+    ],
+    "blockchain_beginners": [
+      "Build Resilient Apps with Polkadot Cloud"
+    ],
+    "blockchain_advanced": [
+      "QIE Blockchain Hackathon 2025"
+    ]
+  },
+
+  "prize_money_breakdown": {
+    "total_ai_prizes": "$447,500+",
+    "total_blockchain_prizes": "$40,000+",
+    "highest_single_prize": "$176,500 (Chroma Awards)",
+    "most_accessible": "$15,000 (ARM AI Developer Challenge - 419 participants)"
+  }
+}

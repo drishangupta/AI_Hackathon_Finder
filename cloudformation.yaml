@@ -1,8 +1,103 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Hackathon Hunter - Complete Infrastructure'
+Description: 'Hackathon Hunter - Definitive, deployable infrastructure stack including VPC, databases, and compute for both Scout and Nudge agents.'
 
 Resources:
-  # DynamoDB Tables
+  # --- 1. NETWORKING (FOR ECS FARGATE) ---
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VPC'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-IGW'
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicSubnetA'
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicSubnetB'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-PublicRouteTable'
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  ScoutAgentSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-ScoutAgentSG'
+      GroupDescription: 'Allow outbound traffic for Scout Agent'
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: 'Allow outbound HTTP for web scraping'
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: 'Allow outbound HTTPS for AWS APIs and web scraping'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ScoutSG'
+
+  # --- 2. DATABASES & STORAGE ---
   HackathonsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -14,6 +109,7 @@ Resources:
         - AttributeName: hackathon_id
           KeyType: HASH
       BillingMode: PAY_PER_REQUEST
+    DeletionPolicy: Retain
 
   ScraperFunctionsTable:
     Type: AWS::DynamoDB::Table
@@ -26,6 +122,7 @@ Resources:
         - AttributeName: source_url
           KeyType: HASH
       BillingMode: PAY_PER_REQUEST
+    DeletionPolicy: Retain
 
   UserInterestsTable:
     Type: AWS::DynamoDB::Table
@@ -42,8 +139,8 @@ Resources:
         - AttributeName: hackathon_id
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
+    DeletionPolicy: Retain
 
-  # OpenSearch Serverless Collection
   OpenSearchCollection:
     Type: AWS::OpenSearchServerless::Collection
     Properties:
@@ -51,11 +148,103 @@ Resources:
       Type: VECTORSEARCH
       Description: Vector storage for user preferences
 
-  # IAM Roles
+  KnowledgeBaseBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'hackathon-kb-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+    DeletionPolicy: Retain
+
+  # --- 3. BEDROCK KNOWLEDGE BASE ---
+  HackathonKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: hackathon-trusted-sources
+      Description: Trusted hackathon websites and API patterns
+      RoleArn: !GetAtt KnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1'
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: !GetAtt OpenSearchCollection.Arn
+          VectorIndexName: 'bedrock-kb-index'
+          FieldMapping:
+            VectorField: 'vector'
+            TextField: 'text'
+            MetadataField: 'metadata'
+
+  KnowledgeBaseDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      Name: trusted-hackathon-sites-source
+      Description: S3 data source for the knowledge base
+      KnowledgeBaseId: !Ref HackathonKnowledgeBase
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !GetAtt KnowledgeBaseBucket.Arn
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration:
+            MaxTokens: 512
+            OverlapPercentage: 20
+
+  KnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KnowledgeBaseAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt KnowledgeBaseBucket.Arn
+                  - !Sub '${KnowledgeBaseBucket.Arn}/*'
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1'
+              - Effect: Allow
+                Action: aoss:APIAccessAll
+                Resource: !GetAtt OpenSearchCollection.Arn
+
+  # --- 4. IAM ROLES ---
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ECSExecutionRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
   ScoutAgentRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: HackathonScoutRole
+      RoleName: !Sub '${AWS::StackName}-ScoutAgentRole'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -71,9 +260,11 @@ Resources:
               - Effect: Allow
                 Action:
                   - bedrock:InvokeModel
+                  - bedrock:Retrieve
                 Resource:
                   - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0'
                   - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1'
+                  - !GetAtt HackathonKnowledgeBase.Arn
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
@@ -91,7 +282,7 @@ Resources:
   NudgeAgentRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: HackathonNudgeRole
+      RoleName: !Sub '${AWS::StackName}-NudgeAgentRole'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -112,14 +303,54 @@ Resources:
               - Effect: Allow
                 Action: aoss:APIAccessAll
                 Resource: !GetAtt OpenSearchCollection.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt HackathonsTable.Arn
+                  - !GetAtt UserInterestsTable.Arn
 
-  # ECS Cluster
+  TelegramHandlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-TelegramHandlerRole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TelegramHandlerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Ref ScoutTaskDefinition
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt ScoutAgentRole.Arn
+                  - !GetAtt ECSExecutionRole.Arn
+
+  # --- 5. COMPUTE & API ---
+  ScoutECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: hackathon-scout
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: hackathon-hunter
 
-  # ECS Task Definition
   ScoutTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -127,13 +358,13 @@ Resources:
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
-      Cpu: 256
-      Memory: 512
-      ExecutionRoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/ecsTaskExecutionRole'
+      Cpu: '1024' # 1 vCPU
+      Memory: '2048' # 2 GB
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
       TaskRoleArn: !GetAtt ScoutAgentRole.Arn
       ContainerDefinitions:
         - Name: scout-agent
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/hackathon-scout:latest'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ScoutECRRepository}:latest'
           Essential: true
           LogConfiguration:
             LogDriver: awslogs
@@ -142,18 +373,33 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
 
-  # CloudWatch Log Group
+  ScoutECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: hackathon-scout-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ScoutTaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: 0 # We run tasks on-demand via the API, not as a persistent service.
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PublicSubnetA
+            - !Ref PublicSubnetB
+          SecurityGroups:
+            - !Ref ScoutAgentSecurityGroup
+          AssignPublicIp: ENABLED
+
   ScoutLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /ecs/hackathon-scout
       RetentionInDays: 7
 
-  # Lambda Function for Nudge Agent
   NudgeLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: hackathon-nudge-agent
+      FunctionName: !Sub '${AWS::StackName}-NudgeAgent'
       Runtime: python3.11
       Handler: nudge_agent.lambda_handler
       Role: !GetAtt NudgeAgentRole.Arn
@@ -162,21 +408,42 @@ Resources:
           # Placeholder - deploy actual code separately
           def lambda_handler(event, context):
               return {'statusCode': 200}
-      Timeout: 300
+      Timeout: 60
 
-  # EventBridge Rule for Weekly Notifications
+  TelegramHandlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-TelegramHandler'
+      Runtime: python3.11
+      Handler: telegram_handler.lambda_handler
+      Role: !GetAtt TelegramHandlerRole.Arn
+      Environment:
+        Variables:
+          SCOUT_TASK_DEFINITION_ARN: !Ref ScoutTaskDefinition
+          ECS_CLUSTER_NAME: !Ref ECSCluster
+          SUBNET_A: !Ref PublicSubnetA
+          SUBNET_B: !Ref PublicSubnetB
+          SECURITY_GROUP_ID: !Ref ScoutAgentSecurityGroup
+      Code:
+        ZipFile: |
+          # Placeholder - deploy actual code separately
+          import json
+          def lambda_handler(event, context):
+              # Your logic to parse Telegram message and invoke ECS task
+              return {'statusCode': 200, 'body': json.dumps('OK')}
+      Timeout: 30
+
   WeeklyNotificationRule:
     Type: AWS::Events::Rule
     Properties:
       Name: weekly-hackathon-notifications
-      ScheduleExpression: 'rate(7 days)'
+      ScheduleExpression: 'cron(0 20 ? * SUN *)' # Every Sunday at 8 PM UTC
       State: ENABLED
       Targets:
         - Arn: !GetAtt NudgeLambdaFunction.Arn
           Id: NudgeAgentTarget
 
-  # Lambda Permission for EventBridge
-  LambdaInvokePermission:
+  LambdaInvokePermissionNudge:
     Type: AWS::Lambda::Permission
     Properties:
       Action: lambda:InvokeFunction
@@ -184,11 +451,78 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt WeeklyNotificationRule.Arn
 
+  TelegramAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: hackathon-telegram-webhook
+      Description: Webhook endpoint for Telegram bot
+
+  WebhookResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref TelegramAPI
+      ParentId: !GetAtt TelegramAPI.RootResourceId
+      PathPart: webhook
+
+  WebhookMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref TelegramAPI
+      ResourceId: !Ref WebhookResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TelegramHandlerFunction.Arn}/invocations'
+
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: WebhookMethod
+    Properties:
+      RestApiId: !Ref TelegramAPI
+      StageName: prod
+
+  APIGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TelegramHandlerFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${TelegramAPI}/prod/POST/webhook'
+
 Outputs:
+  VPCId:
+    Description: The ID of the VPC
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPCId'
+  ScoutAgentSecurityGroupId:
+    Description: The ID of the Security Group for the Scout Agent
+    Value: !Ref ScoutAgentSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroupId'
+  PublicSubnetIds:
+    Description: The IDs of the public subnets
+    Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnetIds'
   OpenSearchEndpoint:
     Description: OpenSearch collection endpoint
     Value: !GetAtt OpenSearchCollection.CollectionEndpoint
-  
   ECSClusterName:
     Description: ECS cluster name
     Value: !Ref ECSCluster
+  KnowledgeBaseId:
+    Description: Bedrock Knowledge Base ID
+    Value: !Ref HackathonKnowledgeBase
+  TelegramWebhookURL:
+    Description: Telegram webhook URL to configure your bot
+    Value: !Sub 'https://${TelegramAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook'
+  ECRRepositoryURI:
+    Description: ECR repository URI for Scout agent
+    Value: !GetAtt ScoutECRRepository.RepositoryUri
+  S3BucketName:
+    Description: S3 bucket for Knowledge Base documents
+    Value: !Ref KnowledgeBaseBucket
+

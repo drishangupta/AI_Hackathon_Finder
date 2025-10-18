@@ -16,6 +16,17 @@ def main():
             
         # 2. Make libraries available for the exec() call
         # The code inside exec() needs access to 'requests' and 'BeautifulSoup'
+        safe_builtins = {
+            'print': print,
+            'len': len,
+            'str': str,
+            'int': int,
+            'dict': dict,
+            'list': list,
+            'range': range,
+            'enumerate': enumerate
+        }
+        
         local_scope = {
             "requests": requests,
             "BeautifulSoup": BeautifulSoup
@@ -23,7 +34,7 @@ def main():
         
         # 3. Execute the LLM-generated code in a controlled scope
         # This defines the 'extract_hackathons' function within local_scope
-        exec(scraper_code, {"__builtins__": {}}, local_scope)
+        exec(scraper_code, {"__builtins__": safe_builtins}, local_scope)
 
         # 4. Check if the function was defined
         if 'extract_hackathons' not in local_scope:

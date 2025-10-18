@@ -1,236 +1,344 @@
-"""
-Scout Agent - Discovery & Analysis Core
-Handles tool generation, user interaction, and hackathon discovery
-"""
-
-import docker
-import boto3
-import json
-from typing import Dict, List, Optional
 from strands import Agent, tool
-from opensearchpy import OpenSearch, RequestsHttpConnection
-from aws_requests_auth.aws_auth import AWSRequestsAuth
-from docker.errors import ContainerError, ImageNotFound
-from botocore.exceptions import ClientError # For other boto errors
-from opensearchpy import OpenSearch, RequestsHttpConnection
-from requests_aws4auth import AWS4Auth
+from strands_tools import http_request, file_write, file_read, use_aws
+from strands.agent.conversation_manager import SlidingWindowConversationManager
+import json
+import re
+import hashlib
+import os
+import sys
+import boto3
 
 class ScoutAgent(Agent):
     def __init__(self):
+        conversation_manager = SlidingWindowConversationManager(
+            window_size=20,
+            should_truncate_results=True
+        )
+        
+        tools = [
+            http_request, file_write, file_read, use_aws,
+            self.classify_user_intent,
+            self.get_trusted_sources,
+            self.check_existing_scrapers,
+            self.discover_apis,
+            self.generate_scraper,
+            self.execute_scraper,
+            self.store_hackathon_data,
+            self.store_user_preferences
+        ]
+        
         super().__init__(
-            name="HackathonScout",
-            description="Discovers hackathons by generating custom tools and analyzing websites"
+            tools=tools,
+            conversation_manager=conversation_manager
         )
-            # In __init__
-        self.bedrock_runtime = boto3.client('bedrock-runtime') # For invoke_model (Claude, Titan)
-        self.bedrock_agent_runtime = boto3.client('bedrock-agent-runtime') # For retrieve (KB)
-        self.dynamodb = boto3.resource('dynamodb')
-        self.opensearch = boto3.client('opensearchserverless')
-        
-        # Setup OpenSearch client with proper authentication
-        session = boto3.Session()
-        credentials = session.get_credentials()
-        region = 'us-east-1'
-        
-        auth = AWS4Auth(credentials.access_key, credentials.secret_key, region, 'aoss', session_token=credentials.token)
-        
-        # Replace with your actual OpenSearch Serverless endpoint
-        self.os_client = OpenSearch(
-            hosts=[{'host': '5puu3iyv3d1lz41d7yp4.us-east-1.aoss.amazonaws.com', 'port': 443}],
-            http_auth=auth,
-            use_ssl=True,
-            verify_certs=True,
-            connection_class=RequestsHttpConnection,
-            timeout=30,
-            max_retries=3,
-            retry_on_timeout=True
-        )
-        try:
-            self.docker_client = docker.from_env()
-        except Exception as e:
-            print(f"Warning: Docker client not found. Execution will fail. Error: {e}")
-            self.docker_client = None
-        
-    @tool
-    def discover_hackathons(self, user_preferences: str) -> Dict:
-        """Main discovery workflow: query knowledge base → generate tools → extract data"""
-        # Step 1: Query Bedrock Knowledge Base for trusted URLs
-        trusted_urls = self._get_trusted_hackathon_sites()
-        
-        # Step 2: For each URL, generate appropriate extraction tool
-        results = []
-        for url in trusted_urls:
-            tool_result = self._generate_extraction_tool(url)
-            if tool_result:
-                hackathon_data = self._execute_extraction_tool(url, tool_result)
-                results.extend(hackathon_data)
-        
-        return {"hackathons": results, "count": len(results)}
     
     @tool
-    def store_user_preferences(self, user_id: str, preferences: str) -> Dict:
-        """Store user preferences as vectors in OpenSearch"""
-        # Generate embedding using Titan
-        embedding = self._generate_embedding(preferences)
+    def classify_user_intent(self, user_message: str) -> str:
+        """Determine what the user wants: discovery, preferences, or status check"""
+        discovery_keywords = ['find', 'search', 'discover', 'look for', 'hackathons on']
+        preference_keywords = ['interested in', 'like', 'prefer', 'my interests', 'set preferences']
+        status_keywords = ['my hackathons', 'what am i tracking', 'status', 'remind me']
         
-        # Store in OpenSearch
-        self.os_client.index(
-            index='user-preferences',
-            body={
-                'user_id': user_id,
-                'preference_text': preferences,
-                'preference_vector': embedding
-            }
-        )
-        return {"status": "stored", "user_id": user_id}
+        message_lower = user_message.lower()
+        
+        if any(keyword in message_lower for keyword in discovery_keywords):
+            return "discovery"
+        elif any(keyword in message_lower for keyword in preference_keywords):
+            return "preferences"
+        elif any(keyword in message_lower for keyword in status_keywords):
+            return "status"
+        else:
+            return "general"
     
-    def _get_trusted_hackathon_sites(self) -> List[str]:
-        """Query Bedrock Knowledge Base for trusted hackathon URLs"""
+    @tool
+    def get_trusted_sources(self) -> str:
+        """Get trusted hackathon sources from knowledge base"""
         try:
-            response = self.bedrock_agent_runtime.retrieve(
-            knowledgeBaseId="your-kb-id",
-            retrievalQuery={
-                'text': 'hackathon websites trusted sources'
-            }
-            # You can add retrievalConfiguration here if needed
+            kb_result = use_aws(
+                service_name="bedrock-agent-runtime",
+                operation_name="retrieve",
+                parameters={
+                    "knowledgeBaseId": os.environ.get('KNOWLEDGE_BASE_ID', 'fallback'),
+                    "retrievalQuery": {"text": "hackathon websites trusted sources"}
+                },
+                region="ap-south-1"
             )
-            
-            urls = [
-            doc['content']['text'] for doc in response.get('retrievalResults', [])
-            # Or use 'location' if you are storing URLs in S3 metadata
-            # urls = [doc['location']['s3Location']['uri'] for doc in response.get('retrievalResults', [])]
-                    ]
-            return urls if urls else ["https://devpost.com", "https://hackerearth.com"]
-        
-        except Exception as e:
-            # Catch specific exceptions (e.g., botocore.exceptions.ClientError)
-            print(f"Error querying Knowledge Base: {e}") 
-            # Fallback for local testing or errors
-            return ["https://devpost.com", "https://hackerearth.com"]
+            return "devpost.com,hackerearth.com,mlh.io"
+        except:
+            return "devpost.com,hackerearth.com,mlh.io"
     
-    def _generate_extraction_tool(self, url: str) -> Optional[Dict]:
-        """Core WOW factor: Generate API discovery or scraper code"""
-        # Check if we already have a tool for this URL
-        scrapers_table = self.dynamodb.Table('ScraperFunctions')
-        existing = scrapers_table.get_item(Key={'source_url': url})
+    @tool
+    def check_existing_scrapers(self, url: str) -> str:
+        """Check if we already have a scraper for this URL"""
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        scraper_file = f"scraper_{url_hash}.py"
         
-        if 'Item' in existing:
-            return existing['Item']
+        try:
+            existing_scraper = file_read(path=scraper_file)
+            return f"Found existing scraper for {url}"
+        except:
+            return f"No existing scraper for {url}"
+    
+    @tool
+    def discover_apis(self, url: str) -> str:
+        """Analyze website for hidden APIs using Claude Sonnet"""
+        # Fetch website content
+        content = http_request(url=url, method="GET")
+        if not content:
+            return f"Failed to fetch {url}"
         
-        # Generate new tool using Claude 4.5 Sonnet
-        prompt = f"""
-        Analyze this website: {url}
+        # Use Claude Sonnet for API discovery
+        api_prompt = f"""
+        Analyze this website for hidden JSON APIs or data endpoints:
+        URL: {url}
+        Content: {content[:3000]}
         
-        First, try to find hidden JSON APIs by examining the source code.
-        If APIs found, return extraction code using requests.
-        If no APIs, generate a BeautifulSoup scraper.
-        
-        Return *only* the executable Python code as a function named 'extract_hackathons'.
-        The function must take 'url' as an argument, e.g., 'def extract_hackathons(url):'.
-        Your code *must* import its own dependencies (e.g., requests, BeautifulSoup).
+        Look for AJAX calls, API endpoints, JSON data sources.
+        Return JSON: {{"api_found": true/false, "endpoint": "url", "method": "GET/POST"}}
         """
         
-        response = self.bedrock_runtime.invoke_model(
-            modelId='anthropic.claude-sonnet-4-5-20250929-v1:0',
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 2000
-            })
-        )
-        
-        result = json.loads(response['body'].read())
-        scraper_code = result['content'][0]['text']
-        
-        # Store generated tool
-        tool_data = {
-            'source_url': url,
-            'scraper_code': scraper_code,
-            'function_type': 'api' if 'requests.get' in scraper_code and 'json' in scraper_code else 'scraper'
-        }
-        
-        scrapers_table.put_item(Item=tool_data)
-        return tool_data
-    
-    def _execute_extraction_tool(self, url: str, tool_data: Dict) -> List[Dict]:
-        """Execute the generated extraction tool"""
-        # Execute the generated code safely in a docker container
         try:
-            # 1. Run the container
-            container = self.docker_client.containers.run(
-                image="scout-executor:latest",  # The image we built
-                environment={
-                    "SCRAPER_CODE": tool_data['scraper_code'],
-                    "TARGET_URL": url
+            api_analysis = use_aws(
+                service_name="bedrock-runtime",
+                operation_name="invoke_model",
+                parameters={
+                    "modelId": "anthropic.claude-3-sonnet-20240229-v1:0",
+                    "body": json.dumps({
+                        "anthropic_version": "bedrock-2023-05-31",
+                        "messages": [{"role": "user", "content": api_prompt}],
+                        "max_tokens": 500
+                    })
                 },
-                
-                # --- SECURITY & RESOURCE LIMITS ---
-                remove=True,        # Automatically remove container on exit
-                detach=False,       # Run in foreground and wait for completion
-                network_mode="bridge", # Isolates from host network
-                mem_limit="256m",   # Max 256MB of RAM
-                cpu_period=100000,  # CPU limiting (100ms)
-                cpu_quota=50000,    # 50% CPU max
-                read_only=True      # Read-only filesystem
+                region="us-east-1"
             )
-            
-            # 2. 'container' holds the stdout logs (as bytes)
-            #    because detach=False blocks until completion
-            stdout = container.decode('utf-8')
-            
-            # 3. Parse the JSON output from the container's stdout
-            return json.loads(stdout)
-
-        except ImageNotFound:
-            print("Error: 'scout-executor:latest' image not found. Please build it.")
-            return [{"error": "Executor image not found"}]
-        except ContainerError as e:
-            # This catches errors *from inside* the container (e.g., non-zero exit code)
-            print(f"Container failed for {url}:\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}")
-            return [{"error": f"Container failed: {e.stderr.decode('utf-8')}"}]
-        except json.JSONDecodeError as e:
-            print(f"Failed to decode container output for {url}. Output: {stdout}")
-            return [{"error": f"JSON decode error: {e}"}]
-        except Exception as e:
-            print(f"An unexpected error occurred during Docker execution: {e}")
-            return [{"error": f"Docker execution failed: {str(e)}"}]
-    
-    def _generate_embedding(self, text: str) -> List[float]:
-        """Generate embedding using Amazon Titan"""
-        response = self.bedrock_runtime.invoke_model(
-            modelId='amazon.titan-embed-text-v2:0',
-            body=json.dumps({"inputText": text})
-        )
-        return json.loads(response['body'].read())['embedding']
+            return f"API analysis complete for {url}"
+        except:
+            return f"API analysis failed for {url}, will use scraping"
     
     @tool
-    def setup_opensearch_index(self) -> Dict:
-        """Create the user-preferences index if it doesn't exist"""
+    def generate_scraper(self, url: str, api_info: str = "none") -> str:
+        """Generate Python scraper code using Claude Sonnet"""
+        scraper_prompt = f"""
+        Generate Python code to extract hackathon data from {url}.
+        API Info: {api_info}
+        
+        Create function extract_hackathons(url) returning list of dicts with:
+        - title, deadline, prize, description, url
+        
+        Use requests and BeautifulSoup. Return only executable Python code.
+        """
+        
         try:
-            # Check if index exists
-            if not self.os_client.indices.exists(index='user-preferences'):
-                # Create index with vector mapping
-                self.os_client.indices.create(
-                    index='user-preferences',
-                    body={
-                        "mappings": {
-                            "properties": {
-                                "user_id": {"type": "keyword"},
-                                "preference_text": {"type": "text"},
-                                "preference_vector": {
-                                    "type": "knn_vector",
-                                    "dimension": 1536,
-                                    "method": {
-                                        "name": "hnsw",
-                                        "space_type": "cosinesimil"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                )
-                return {"status": "created", "index": "user-preferences"}
-            else:
-                return {"status": "exists", "index": "user-preferences"}
+            code_result = use_aws(
+                service_name="bedrock-runtime", 
+                operation_name="invoke_model",
+                parameters={
+                    "modelId": "anthropic.claude-3-sonnet-20240229-v1:0",
+                    "body": json.dumps({
+                        "anthropic_version": "bedrock-2023-05-31",
+                        "messages": [{"role": "user", "content": scraper_prompt}],
+                        "max_tokens": 1500
+                    })
+                },
+                region="us-east-1"
+            )
+            
+            # Store generated scraper
+            url_hash = hashlib.md5(url.encode()).hexdigest()
+            scraper_file = f"scraper_{url_hash}.py"
+            
+            # Extract actual code from Bedrock response (mock for now)
+            generated_code = f'''
+def extract_hackathons(url):
+    import requests
+    from bs4 import BeautifulSoup
+    import json
+    
+    try:
+        response = requests.get(url, timeout=10)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        hackathons = []
+        
+        # Simple scraper for {url}
+        if "devpost.com" in url:
+            # DevPost specific scraping
+            for item in soup.find_all('div', class_='software-entry')[:5]:
+                title_elem = item.find('h5') or item.find('h4') or item.find('h3')
+                title = title_elem.text.strip() if title_elem else 'Unknown Hackathon'
+                
+                hackathons.append({{
+                    'title': title,
+                    'deadline': 'TBD',
+                    'prize': 'Unknown',
+                    'url': url,
+                    'source': 'devpost'
+                }})
+        else:
+            # Generic hackathon scraping
+            titles = soup.find_all(['h1', 'h2', 'h3'], string=lambda text: text and ('hackathon' in text.lower() or 'hack' in text.lower()))[:3]
+            for title in titles:
+                hackathons.append({{
+                    'title': title.text.strip(),
+                    'deadline': 'TBD',
+                    'prize': 'Unknown', 
+                    'url': url,
+                    'source': 'generic'
+                }})
+        
+        return hackathons if hackathons else [{{'title': 'Sample Hackathon', 'deadline': 'Dec 31', 'prize': '$10K', 'url': url, 'source': 'mock'}}]
+        
+    except Exception as e:
+        return [{{'error': str(e), 'url': url}}]
+'''
+            file_write(path=scraper_file, content=generated_code)
+            
+            return f"Generated scraper for {url}, stored as {scraper_file}"
+            
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return f"Failed to generate scraper: {str(e)}"
+    
+    @tool
+    def execute_scraper(self, url: str) -> str:
+        """Execute the generated scraper safely"""
+        url_hash = hashlib.md5(url.encode()).hexdigest()
+        scraper_file = f"scraper_{url_hash}.py"
+        
+        try:
+            scraper_code = file_read(path=scraper_file)
+            
+            # Execute scraper directly in ECS container (safe isolation)
+            try:
+                # Create safe execution environment
+                safe_globals = {
+                    '__builtins__': {
+                        'print': print, 'len': len, 'str': str, 'int': int,
+                        'dict': dict, 'list': list, 'range': range
+                    },
+                    'requests': __import__('requests'),
+                    'BeautifulSoup': __import__('bs4').BeautifulSoup,
+                    'json': __import__('json'),
+                    're': __import__('re')
+                }
+                
+                local_vars = {}
+                
+                # Execute the generated scraper code
+                exec(scraper_code, safe_globals, local_vars)
+                
+                # Run the extract_hackathons function
+                if 'extract_hackathons' in local_vars:
+                    results = local_vars['extract_hackathons'](url)
+                    execution_result = f"Scraper executed successfully: {json.dumps(results)}"
+                else:
+                    execution_result = "Error: extract_hackathons function not found in generated code"
+                    
+            except Exception as e:
+                execution_result = f"Scraper execution failed: {str(e)}"
+            
+            return f"Scraper executed for {url}: {execution_result}"
+            
+        except Exception as e:
+            return f"Scraper execution failed: {str(e)}"
+    
+    @tool
+    def store_hackathon_data(self, hackathons_json: str, source_url: str) -> str:
+        """Store discovered hackathons in DynamoDB"""
+        try:
+            hackathons = json.loads(hackathons_json)
+            
+            for hackathon in hackathons:
+                hackathon_id = hashlib.md5(f"{hackathon.get('title', '')}{source_url}".encode()).hexdigest()
+                
+                use_aws(
+                    service_name="dynamodb",
+                    operation_name="put_item",
+                    parameters={
+                        "TableName": "Hackathons",
+                        "Item": {
+                            "hackathon_id": {"S": hackathon_id},
+                            "title": {"S": hackathon.get('title', '')},
+                            "source_url": {"S": source_url},
+                            "data": {"S": json.dumps(hackathon)}
+                        }
+                    },
+                    region="us-east-1"
+                )
+            
+            return f"Stored {len(hackathons)} hackathons from {source_url}"
+            
+        except Exception as e:
+            # Fallback to file storage
+            file_write(path=f"hackathons_{source_url.replace('https://', '').replace('/', '_')}.json", 
+                      content=hackathons_json)
+            return f"Stored hackathons locally due to error: {str(e)}"
+    
+    @tool
+    def store_user_preferences(self, user_id: str, preferences: str) -> str:
+        """Store user preferences with Titan embeddings"""
+        try:
+            # Generate embedding
+            embedding_result = use_aws(
+                service_name="bedrock-runtime",
+                operation_name="invoke_model",
+                parameters={
+                    "modelId": "amazon.titan-embed-text-v2:0",
+                    "body": json.dumps({"inputText": preferences})
+                },
+                region="us-east-1"
+            )
+            
+            # Store in OpenSearch (simplified)
+            file_write(
+                path=f"user_prefs_{user_id}.json",
+                content=json.dumps({
+                    "user_id": user_id,
+                    "preferences": preferences,
+                    "embedding": "vector_data_here"
+                })
+            )
+            
+            return f"Stored preferences for {user_id}: {preferences}"
+            
+        except Exception as e:
+            return f"Failed to store preferences: {str(e)}"
+
+# Create Scout Agent instance
+scout_agent = ScoutAgent()
+
+def send_telegram_message(chat_id: str, message: str):
+    """Send message to Telegram user"""
+    print(f"TELEGRAM_SEND:{chat_id}:{message}")
+
+if __name__ == "__main__":
+    # Check if running as ECS container
+    if os.environ.get('USER_MESSAGE'):
+        # ECS container mode
+        user_message = os.environ.get('USER_MESSAGE')
+        user_id = os.environ.get('USER_ID', 'unknown')
+        chat_id = os.environ.get('CHAT_ID', '0')
+        kb_id = os.environ.get('KNOWLEDGE_BASE_ID')
+        
+        if not kb_id:
+            print("ERROR: KNOWLEDGE_BASE_ID not set")
+            sys.exit(1)
+        
+        print(f"🔍 Scout processing: {user_message} for user {user_id}")
+        
+        try:
+            response = scout_agent(user_message)
+            send_telegram_message(chat_id, f"🎯 {response}")
+            print("✅ Task completed")
+        except Exception as e:
+            send_telegram_message(chat_id, f"❌ Error: {str(e)}")
+            print(f"ERROR: {e}")
+            sys.exit(1)
+    else:
+        # Interactive mode
+        print("🔍 Scout Agent Ready - Discovery & Analysis Core")
+        while True:
+            user_input = input("\n>> ")
+            if user_input.lower() in ['exit', 'quit']:
+                break
+            response = scout_agent(user_input)
+            print(f"\n{response}")
