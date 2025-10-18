@@ -1,115 +1,94 @@
 import json
 import boto3
 import os
-from typing import Dict, Any
+import requests
 
-def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+def lambda_handler(event, context):
     """
-    Telegram webhook handler - routes messages to Scout/Nudge agents
+    This function has two jobs, routed by the event structure:
+    1. Handle incoming webhooks from Telegram (via API Gateway) to START a task.
+    2. Handle incoming events from an SQS queue to SEND a response back to the user.
     """
-    try:
-        # Parse Telegram webhook payload
-        body = json.loads(event.get('body', '{}'))
-        message = body.get('message', {})
-        text = message.get('text', '')
-        user_id = str(message.get('from', {}).get('id', ''))
-        chat_id = message.get('chat', {}).get('id')
-        
-        if not text or not user_id:
-            return {'statusCode': 200, 'body': json.dumps('OK')}
-        
-        # Route to appropriate agent based on intent
-        if any(keyword in text.lower() for keyword in ['find', 'search', 'discover', 'look for']):
-            # Route to Scout agent (ECS Fargate)
-            response = trigger_scout_agent(text, user_id, chat_id)
-        elif any(keyword in text.lower() for keyword in ['remind', 'notify', 'interested', 'preferences']):
-            # Route to Nudge agent (Lambda)
-            response = trigger_nudge_agent(text, user_id, chat_id)
-        else:
-            # Default to Scout for general queries
-            response = trigger_scout_agent(text, user_id, chat_id)
-        
-        return {'statusCode': 200, 'body': json.dumps('OK')}
-        
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        return {'statusCode': 500, 'body': json.dumps('Error')}
+    if 'Records' in event:
+        # This is an SQS event from the Scout Agent
+        for record in event['Records']:
+            try:
+                payload = json.loads(record['body'])
+                chat_id = payload.get('chat_id')
+                message = payload.get('message')
+                if chat_id and message:
+                    send_telegram_message(chat_id, message)
+            except Exception as e:
+                print(f"ERROR: Could not process SQS record: {e}")
+        return {'statusCode': 200}
+    else:
+        # This is an API Gateway (Telegram webhook) event to start a new task
+        try:
+            body = json.loads(event.get('body', '{}'))
+            message = body.get('message', {})
+            text = message.get('text', '')
+            chat_id = message.get('chat', {}).get('id')
+            if not text or not chat_id:
+                return {'statusCode': 200, 'body': json.dumps('OK')}
+            
+            # Send an immediate acknowledgement to the user
+            send_telegram_message(chat_id, "✅ Request received! The Scout Agent is on the case. I'll send you live updates as it makes progress...")
 
-def trigger_scout_agent(message: str, user_id: str, chat_id: int) -> str:
-    """Trigger Scout agent on ECS Fargate for complex discovery tasks"""
-    ecs = boto3.client('ecs')
-    
-    try:
-        # Send immediate response to user
-        send_telegram_message(chat_id, "🔍 Analyzing... I'll find hackathons for you!")
-        
-        # Run Scout agent task
-        response = ecs.run_task(
-            cluster=os.environ['ECS_CLUSTER_NAME'],
-            taskDefinition=os.environ['SCOUT_TASK_DEFINITION_ARN'],
-            launchType='FARGATE',
-            networkConfiguration={
-                'awsvpcConfiguration': {
-                    'subnets': [os.environ['SUBNET_A'], os.environ['SUBNET_B']],
-                    'securityGroups': [os.environ['SECURITY_GROUP_ID']],
-                    'assignPublicIp': 'ENABLED'
+            ecs_client = boto3.client('ecs')
+            
+            # Combine all necessary environment variables for the container
+            container_environment = [
+                {'name': 'HACKATHONS_TABLE', 'value': os.environ['HACKATHONS_TABLE']},
+                {'name': 'SCRAPER_FUNCTIONS_TABLE', 'value': os.environ['SCRAPER_FUNCTIONS_TABLE']},
+                {'name': 'USER_INTERESTS_TABLE', 'value': os.environ['USER_INTERESTS_TABLE']},
+                {'name': 'KNOWLEDGE_BASE_ID', 'value': os.environ['KNOWLEDGE_BASE_ID']},
+                {'name': 'AWS_REGION', 'value': os.environ['AWS_REGION']},
+                {'name': 'RESPONSE_QUEUE_URL', 'value': os.environ['RESPONSE_QUEUE_URL']},
+                {'name': 'OPENSEARCH_ENDPOINT', 'value': os.environ['OPENSEARCH_ENDPOINT']},
+                {'name': 'TELEGRAM_BOT_TOKEN', 'value': os.environ('TELEGRAM_BOT_TOKEN')},
+                # Dynamic variables specific to this request
+                {'name': 'USER_MESSAGE', 'value': text},
+                {'name': 'CHAT_ID', 'value': str(chat_id)}
+            ]
+
+            # Asynchronously trigger the Scout Agent on ECS
+            ecs_client.run_task(
+                cluster=os.environ['ECS_CLUSTER_NAME'],
+                taskDefinition=os.environ['SCOUT_TASK_DEFINITION_ARN'],
+                launchType='FARGATE',
+                networkConfiguration={
+                    'awsvpcConfiguration': {
+                        'subnets': [os.environ['SUBNET_A'], os.environ['SUBNET_B']],
+                        'securityGroups': [os.environ['SECURITY_GROUP_ID']],
+                        'assignPublicIp': 'ENABLED'
+                    }
+                },
+                overrides={
+                    'containerOverrides': [{
+                        'name': 'scout-agent',
+                        'environment': container_environment
+                    }]
                 }
-            },
-            overrides={
-                'containerOverrides': [{
-                    'name': 'scout-agent',
-                    'environment': [
-                        {'name': 'USER_MESSAGE', 'value': message},
-                        {'name': 'USER_ID', 'value': user_id},
-                        {'name': 'CHAT_ID', 'value': str(chat_id)},
-                        {'name': 'KNOWLEDGE_BASE_ID', 'value': os.environ['KNOWLEDGE_BASE_ID']}
-                    ]
-                }]
-            }
-        )
-        
-        return f"Scout task started: {response['tasks'][0]['taskArn']}"
-        
-    except Exception as e:
-        send_telegram_message(chat_id, f"❌ Error starting search: {str(e)}")
-        return f"Error: {str(e)}"
+            )
+            return {'statusCode': 200, 'body': json.dumps('OK')}
+        except Exception as e:
+            print(f"FATAL_ERROR in handler: {e}")
+            return {'statusCode': 500, 'body': json.dumps('Error processing webhook')}
 
-def trigger_nudge_agent(message: str, user_id: str, chat_id: int) -> str:
-    """Trigger Nudge agent Lambda for preference handling"""
-    lambda_client = boto3.client('lambda')
-    
-    try:
-        payload = {
-            'message': message,
-            'user_id': user_id,
-            'chat_id': chat_id,
-            'action': 'handle_preferences'
-        }
-        
-        response = lambda_client.invoke(
-            FunctionName='hackathon-nudge-agent',
-            InvocationType='Event',  # Async
-            Payload=json.dumps(payload)
-        )
-        
-        send_telegram_message(chat_id, "✅ Got it! I'll remember your preferences.")
-        return "Nudge agent triggered"
-        
-    except Exception as e:
-        send_telegram_message(chat_id, f"❌ Error saving preferences: {str(e)}")
-        return f"Error: {str(e)}"
-
-def send_telegram_message(chat_id: int, text: str):
-    """Send message back to Telegram user"""
-    import requests
-    
+def send_telegram_message(chat_id, text):
+    """Sends a message to a Telegram chat."""
     bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
     if not bot_token:
-        print(f"No bot token - would send to {chat_id}: {text}")
+        print("WARN: TELEGRAM_BOT_TOKEN not set. Cannot send message.")
         return
     
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){bot_token}/sendMessage"
+    payload = {
+        'chat_id': chat_id,
+        'text': text,
+        'parse_mode': 'Markdown'
+    }
     try:
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        requests.post(url, json={'chat_id': chat_id, 'text': text})
-    except Exception as e:
-        print(f"Failed to send message: {e}")
+        requests.post(url, json=payload, timeout=5)
+    except requests.exceptions.RequestException as e:
+        print(f"WARN: Could not send Telegram message: {e}")

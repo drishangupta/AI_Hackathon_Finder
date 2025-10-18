@@ -1,5 +1,16 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Hackathon Hunter - Definitive, deployable infrastructure stack including VPC, databases, and compute for both Scout and Nudge agents.'
+Description: 'Hackathon Hunter - Final Patched: A complete, deployable infrastructure stack including VPC, databases, and compute for both Scout and Nudge agents.'
+
+Parameters:
+  KnowledgeBaseId:
+    Type: String
+    Description: The ID of the manually created Bedrock Knowledge Base.
+  OpenSearchCollectionArn:
+    Type: String
+    Description: The ARN of the manually created OpenSearch Serverless Collection.
+  OpenSearchCollectionEndpoint:
+    Type: String
+    Description: The endpoint of the manually created OpenSearch Serverless Collection (e.g., xyz.us-east-1.aoss.amazonaws.com).
 
 Resources:
   # --- 1. NETWORKING (FOR ECS FARGATE) ---
@@ -42,7 +53,7 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.2.0/24
-      AvailabilityZone: !Select [1, !GetAZs '']
+      AvailabilityZone: !Select [0, !GetAZs '']
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
@@ -97,11 +108,17 @@ Resources:
         - Key: Name
           Value: !Sub '${AWS::StackName}-ScoutSG'
 
-  # --- 2. DATABASES & STORAGE ---
+  # --- 2. DATABASES, STORAGE, & QUEUE ---
+  ScoutResponseQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-ScoutResponseQueue'
+      VisibilityTimeout: 90
+
   HackathonsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: Hackathons
+      TableName: !Sub '${AWS::StackName}-Hackathons'
       AttributeDefinitions:
         - AttributeName: hackathon_id
           AttributeType: S
@@ -114,7 +131,7 @@ Resources:
   ScraperFunctionsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: ScraperFunctions
+      TableName: !Sub '${AWS::StackName}-ScraperFunctions'
       AttributeDefinitions:
         - AttributeName: source_url
           AttributeType: S
@@ -127,7 +144,7 @@ Resources:
   UserInterestsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: UserInterests
+      TableName: !Sub '${AWS::StackName}-UserInterests'
       AttributeDefinitions:
         - AttributeName: user_id
           AttributeType: S
@@ -140,14 +157,7 @@ Resources:
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
     DeletionPolicy: Retain
-
-  OpenSearchCollection:
-    Type: AWS::OpenSearchServerless::Collection
-    Properties:
-      Name: hackathon-hunter
-      Type: VECTORSEARCH
-      Description: Vector storage for user preferences
-
+  
   KnowledgeBaseBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -159,74 +169,7 @@ Resources:
         RestrictPublicBuckets: true
     DeletionPolicy: Retain
 
-  # --- 3. BEDROCK KNOWLEDGE BASE ---
-  HackathonKnowledgeBase:
-    Type: AWS::Bedrock::KnowledgeBase
-    Properties:
-      Name: hackathon-trusted-sources
-      Description: Trusted hackathon websites and API patterns
-      RoleArn: !GetAtt KnowledgeBaseRole.Arn
-      KnowledgeBaseConfiguration:
-        Type: VECTOR
-        VectorKnowledgeBaseConfiguration:
-          EmbeddingModelArn: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1'
-      StorageConfiguration:
-        Type: OPENSEARCH_SERVERLESS
-        OpensearchServerlessConfiguration:
-          CollectionArn: !GetAtt OpenSearchCollection.Arn
-          VectorIndexName: 'bedrock-kb-index'
-          FieldMapping:
-            VectorField: 'vector'
-            TextField: 'text'
-            MetadataField: 'metadata'
-
-  KnowledgeBaseDataSource:
-    Type: AWS::Bedrock::DataSource
-    Properties:
-      Name: trusted-hackathon-sites-source
-      Description: S3 data source for the knowledge base
-      KnowledgeBaseId: !Ref HackathonKnowledgeBase
-      DataSourceConfiguration:
-        Type: S3
-        S3Configuration:
-          BucketArn: !GetAtt KnowledgeBaseBucket.Arn
-      VectorIngestionConfiguration:
-        ChunkingConfiguration:
-          ChunkingStrategy: FIXED_SIZE
-          FixedSizeChunkingConfiguration:
-            MaxTokens: 512
-            OverlapPercentage: 20
-
-  KnowledgeBaseRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: bedrock.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: KnowledgeBaseAccessPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:ListBucket
-                Resource:
-                  - !GetAtt KnowledgeBaseBucket.Arn
-                  - !Sub '${KnowledgeBaseBucket.Arn}/*'
-              - Effect: Allow
-                Action: bedrock:InvokeModel
-                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1'
-              - Effect: Allow
-                Action: aoss:APIAccessAll
-                Resource: !GetAtt OpenSearchCollection.Arn
-
-  # --- 4. IAM ROLES ---
+  # --- 3. IAM ROLES ---
   ECSExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -261,23 +204,23 @@ Resources:
                 Action:
                   - bedrock:InvokeModel
                   - bedrock:Retrieve
-                Resource:
-                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0'
-                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1'
-                  - !GetAtt HackathonKnowledgeBase.Arn
+                  - bedrock:Converse
+                  - bedrock:ConverseStream
+                Resource: 
+                  - '*' # Simplified for hackathon
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}'
               - Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:PutItem
-                  - dynamodb:Query
-                  - dynamodb:Scan
+                Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:BatchWriteItem', 'dynamodb:Query', 'dynamodb:Scan']
                 Resource:
                   - !GetAtt HackathonsTable.Arn
                   - !GetAtt ScraperFunctionsTable.Arn
                   - !GetAtt UserInterestsTable.Arn
               - Effect: Allow
                 Action: aoss:APIAccessAll
-                Resource: !GetAtt OpenSearchCollection.Arn
+                Resource: !Ref OpenSearchCollectionArn
+              - Effect: Allow
+                Action: 'sqs:SendMessage'
+                Resource: !GetAtt ScoutResponseQueue.Arn
 
   NudgeAgentRole:
     Type: AWS::IAM::Role
@@ -302,11 +245,9 @@ Resources:
                 Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
               - Effect: Allow
                 Action: aoss:APIAccessAll
-                Resource: !GetAtt OpenSearchCollection.Arn
+                Resource: !Ref OpenSearchCollectionArn
               - Effect: Allow
-                Action:
-                  - dynamodb:Query
-                  - dynamodb:Scan
+                Action: ['dynamodb:Query', 'dynamodb:Scan']
                 Resource:
                   - !GetAtt HackathonsTable.Arn
                   - !GetAtt UserInterestsTable.Arn
@@ -337,8 +278,25 @@ Resources:
                 Resource:
                   - !GetAtt ScoutAgentRole.Arn
                   - !GetAtt ECSExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+              - Effect: Allow
+                Action: ['sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']
+                Resource: !GetAtt ScoutResponseQueue.Arn
 
-  # --- 5. COMPUTE & API ---
+  # --- 4. COMPUTE & API ---
+  DependenciesLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub '${AWS::StackName}-dependencies'
+      Description: Python dependencies for Lambda functions
+      Content:
+        S3Bucket: !Ref KnowledgeBaseBucket
+        S3Key: lambda-layer.zip
+      CompatibleRuntimes:
+        - python3.11
+
   ScoutECRRepository:
     Type: AWS::ECR::Repository
     Properties:
@@ -358,14 +316,27 @@ Resources:
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
-      Cpu: '1024' # 1 vCPU
-      Memory: '2048' # 2 GB
+      Cpu: '1024'
+      Memory: '2048'
       ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
       TaskRoleArn: !GetAtt ScoutAgentRole.Arn
       ContainerDefinitions:
         - Name: scout-agent
           Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ScoutECRRepository}:latest'
           Essential: true
+          Environment:
+            - Name: HACKATHONS_TABLE
+              Value: !Ref HackathonsTable
+            - Name: SCRAPER_FUNCTIONS_TABLE
+              Value: !Ref ScraperFunctionsTable
+            - Name: USER_INTERESTS_TABLE
+              Value: !Ref UserInterestsTable
+            - Name: KNOWLEDGE_BASE_ID
+              Value: !Ref KnowledgeBaseId
+            - Name: RESPONSE_QUEUE_URL
+              Value: !Ref ScoutResponseQueue
+            - Name: OPENSEARCH_ENDPOINT
+              Value: !Ref OpenSearchCollectionEndpoint
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -376,18 +347,15 @@ Resources:
   ScoutECSService:
     Type: AWS::ECS::Service
     Properties:
-      ServiceName: hackathon-scout-service
+      ServiceName: !Sub '${AWS::StackName}-scout-service'
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref ScoutTaskDefinition
       LaunchType: FARGATE
-      DesiredCount: 0 # We run tasks on-demand via the API, not as a persistent service.
+      DesiredCount: 0
       NetworkConfiguration:
         AwsvpcConfiguration:
-          Subnets:
-            - !Ref PublicSubnetA
-            - !Ref PublicSubnetB
-          SecurityGroups:
-            - !Ref ScoutAgentSecurityGroup
+          Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+          SecurityGroups: [!Ref ScoutAgentSecurityGroup]
           AssignPublicIp: ENABLED
 
   ScoutLogGroup:
@@ -404,11 +372,12 @@ Resources:
       Handler: nudge_agent.lambda_handler
       Role: !GetAtt NudgeAgentRole.Arn
       Code:
+        # Code is deployed via deploy.py
         ZipFile: |
-          # Placeholder - deploy actual code separately
-          def lambda_handler(event, context):
-              return {'statusCode': 200}
+          def lambda_handler(event, context): return {'statusCode': 200, 'body': 'OK'}
       Timeout: 60
+      Layers:
+        - !Ref DependenciesLayer
 
   TelegramHandlerFunction:
     Type: AWS::Lambda::Function
@@ -417,6 +386,8 @@ Resources:
       Runtime: python3.11
       Handler: telegram_handler.lambda_handler
       Role: !GetAtt TelegramHandlerRole.Arn
+      Layers:
+        - !Ref DependenciesLayer
       Environment:
         Variables:
           SCOUT_TASK_DEFINITION_ARN: !Ref ScoutTaskDefinition
@@ -424,20 +395,32 @@ Resources:
           SUBNET_A: !Ref PublicSubnetA
           SUBNET_B: !Ref PublicSubnetB
           SECURITY_GROUP_ID: !Ref ScoutAgentSecurityGroup
+          TELEGRAM_BOT_TOKEN: 'REPLACE_WITH_YOUR_BOT_TOKEN'
+          HACKATHONS_TABLE: !Ref HackathonsTable
+          SCRAPER_FUNCTIONS_TABLE: !Ref ScraperFunctionsTable
+          USER_INTERESTS_TABLE: !Ref UserInterestsTable
+          KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+          RESPONSE_QUEUE_URL: !Ref ScoutResponseQueue
+          OPENSEARCH_ENDPOINT: !Ref OpenSearchCollectionEndpoint
       Code:
+        # Code is deployed via deploy.py
         ZipFile: |
-          # Placeholder - deploy actual code separately
-          import json
           def lambda_handler(event, context):
-              # Your logic to parse Telegram message and invoke ECS task
-              return {'statusCode': 200, 'body': json.dumps('OK')}
-      Timeout: 30
+              return {'statusCode': 200, 'body': 'OK'}
+  
+  SQSEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      EventSourceArn: !GetAtt ScoutResponseQueue.Arn
+      FunctionName: !GetAtt TelegramHandlerFunction.Arn
 
   WeeklyNotificationRule:
     Type: AWS::Events::Rule
     Properties:
       Name: weekly-hackathon-notifications
-      ScheduleExpression: 'cron(0 20 ? * SUN *)' # Every Sunday at 8 PM UTC
+      ScheduleExpression: 'cron(0 20 ? * SUN *)'
       State: ENABLED
       Targets:
         - Arn: !GetAtt NudgeLambdaFunction.Arn
@@ -495,27 +478,15 @@ Outputs:
   VPCId:
     Description: The ID of the VPC
     Value: !Ref VPC
-    Export:
-      Name: !Sub '${AWS::StackName}-VPCId'
   ScoutAgentSecurityGroupId:
     Description: The ID of the Security Group for the Scout Agent
     Value: !Ref ScoutAgentSecurityGroup
-    Export:
-      Name: !Sub '${AWS::StackName}-SecurityGroupId'
   PublicSubnetIds:
     Description: The IDs of the public subnets
     Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
-    Export:
-      Name: !Sub '${AWS::StackName}-PublicSubnetIds'
-  OpenSearchEndpoint:
-    Description: OpenSearch collection endpoint
-    Value: !GetAtt OpenSearchCollection.CollectionEndpoint
   ECSClusterName:
     Description: ECS cluster name
     Value: !Ref ECSCluster
-  KnowledgeBaseId:
-    Description: Bedrock Knowledge Base ID
-    Value: !Ref HackathonKnowledgeBase
   TelegramWebhookURL:
     Description: Telegram webhook URL to configure your bot
     Value: !Sub 'https://${TelegramAPI}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook'
@@ -525,4 +496,13 @@ Outputs:
   S3BucketName:
     Description: S3 bucket for Knowledge Base documents
     Value: !Ref KnowledgeBaseBucket
+  NudgeLambdaFunctionName:
+    Description: The name of the Nudge Agent Lambda function
+    Value: !Ref NudgeLambdaFunction
+  TelegramHandlerFunctionName:
+    Description: The name of the Telegram Handler Lambda function
+    Value: !Ref TelegramHandlerFunction
+  ScoutResponseQueueUrl:
+    Description: The URL of the SQS queue for Scout agent responses
+    Value: !Ref ScoutResponseQueue
 
