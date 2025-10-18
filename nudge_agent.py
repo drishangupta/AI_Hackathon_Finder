@@ -7,6 +7,8 @@ import boto3
 import json
 from typing import Dict, List
 from strands import Agent, tool
+from opensearchpy import OpenSearch, RequestsHttpConnection
+from requests_aws4auth import AWS4Auth
 
 
 class NudgeAgent(Agent):
@@ -15,9 +17,23 @@ class NudgeAgent(Agent):
             name="HackathonNudge",
             description="Sends personalized hackathon notifications based on user interests"
         )
-        self.bedrock = boto3.client('bedrock-runtime')
-        self.dynamodb = boto3.resource('dynamodb')
-        self.opensearch = boto3.client('opensearchserverless')
+        self.bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
+        self.dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+        
+        # Setup OpenSearch client with proper authentication
+        session = boto3.Session()
+        credentials = session.get_credentials()
+        region = 'us-east-1'
+        
+        auth = AWS4Auth(credentials.access_key, credentials.secret_key, region, 'aoss', session_token=credentials.token)
+        
+        self.opensearch = OpenSearch(
+            hosts=[{'host': 'your-collection-id.us-east-1.aoss.amazonaws.com', 'port': 443}],
+            http_auth=auth,
+            use_ssl=True,
+            verify_certs=True,
+            connection_class=RequestsHttpConnection
+        )
     
     @tool
     def send_weekly_notifications(self) -> Dict:

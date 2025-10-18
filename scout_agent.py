@@ -8,9 +8,12 @@ import boto3
 import json
 from typing import Dict, List, Optional
 from strands import Agent, tool
+from opensearchpy import OpenSearch, RequestsHttpConnection
+from aws_requests_auth.aws_auth import AWSRequestsAuth
 from docker.errors import ContainerError, ImageNotFound
 from botocore.exceptions import ClientError # For other boto errors
-
+from opensearchpy import OpenSearch, RequestsHttpConnection
+from requests_aws4auth import AWS4Auth
 
 class ScoutAgent(Agent):
     def __init__(self):
@@ -23,6 +26,22 @@ class ScoutAgent(Agent):
         self.bedrock_agent_runtime = boto3.client('bedrock-agent-runtime') # For retrieve (KB)
         self.dynamodb = boto3.resource('dynamodb')
         self.opensearch = boto3.client('opensearchserverless')
+        
+        # Setup OpenSearch client with proper authentication
+        session = boto3.Session()
+        credentials = session.get_credentials()
+        region = 'us-east-1'
+        
+        auth = AWS4Auth(credentials.access_key, credentials.secret_key, region, 'aoss', session_token=credentials.token)
+        
+        # Replace with your actual OpenSearch Serverless endpoint
+        self.os_client = OpenSearch(
+            hosts=[{'host': 'your-collection-id.us-east-1.aoss.amazonaws.com', 'port': 443}],
+            http_auth=auth,
+            use_ssl=True,
+            verify_certs=True,
+            connection_class=RequestsHttpConnection
+        )
         try:
             self.docker_client = docker.from_env()
         except Exception as e:
@@ -52,7 +71,7 @@ class ScoutAgent(Agent):
         embedding = self._generate_embedding(preferences)
         
         # Store in OpenSearch
-        self.opensearch.index(
+        self.os_client.index(
             index='user-preferences',
             body={
                 'user_id': user_id,
