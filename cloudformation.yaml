@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Hackathon Hunter - Complete Infrastructure'
+
+Resources:
+  # DynamoDB Tables
+  HackathonsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Hackathons
+      AttributeDefinitions:
+        - AttributeName: hackathon_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: hackathon_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  ScraperFunctionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ScraperFunctions
+      AttributeDefinitions:
+        - AttributeName: source_url
+          AttributeType: S
+      KeySchema:
+        - AttributeName: source_url
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  UserInterestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: UserInterests
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: hackathon_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: hackathon_id
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  # OpenSearch Serverless Collection
+  OpenSearchCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    Properties:
+      Name: hackathon-hunter
+      Type: VECTORSEARCH
+      Description: Vector storage for user preferences
+
+  # IAM Roles
+  ScoutAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: HackathonScoutRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ScoutAgentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt HackathonsTable.Arn
+                  - !GetAtt ScraperFunctionsTable.Arn
+                  - !GetAtt UserInterestsTable.Arn
+              - Effect: Allow
+                Action: aoss:APIAccessAll
+                Resource: !GetAtt OpenSearchCollection.Arn
+
+  NudgeAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: HackathonNudgeRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: NudgeAgentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
+              - Effect: Allow
+                Action: aoss:APIAccessAll
+                Resource: !GetAtt OpenSearchCollection.Arn
+
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: hackathon-hunter
+
+  # ECS Task Definition
+  ScoutTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: hackathon-scout-agent
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 512
+      ExecutionRoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/ecsTaskExecutionRole'
+      TaskRoleArn: !GetAtt ScoutAgentRole.Arn
+      ContainerDefinitions:
+        - Name: scout-agent
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/hackathon-scout:latest'
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ScoutLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  # CloudWatch Log Group
+  ScoutLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/hackathon-scout
+      RetentionInDays: 7
+
+  # Lambda Function for Nudge Agent
+  NudgeLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: hackathon-nudge-agent
+      Runtime: python3.11
+      Handler: nudge_agent.lambda_handler
+      Role: !GetAtt NudgeAgentRole.Arn
+      Code:
+        ZipFile: |
+          # Placeholder - deploy actual code separately
+          def lambda_handler(event, context):
+              return {'statusCode': 200}
+      Timeout: 300
+
+  # EventBridge Rule for Weekly Notifications
+  WeeklyNotificationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: weekly-hackathon-notifications
+      ScheduleExpression: 'rate(7 days)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt NudgeLambdaFunction.Arn
+          Id: NudgeAgentTarget
+
+  # Lambda Permission for EventBridge
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref NudgeLambdaFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WeeklyNotificationRule.Arn
+
+Outputs:
+  OpenSearchEndpoint:
+    Description: OpenSearch collection endpoint
+    Value: !GetAtt OpenSearchCollection.CollectionEndpoint
+  
+  ECSClusterName:
+    Description: ECS cluster name
+    Value: !Ref ECSCluster
