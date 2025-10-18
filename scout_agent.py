@@ -36,11 +36,14 @@ class ScoutAgent(Agent):
         
         # Replace with your actual OpenSearch Serverless endpoint
         self.os_client = OpenSearch(
-            hosts=[{'host': 'your-collection-id.us-east-1.aoss.amazonaws.com', 'port': 443}],
+            hosts=[{'host': '5puu3iyv3d1lz41d7yp4.us-east-1.aoss.amazonaws.com', 'port': 443}],
             http_auth=auth,
             use_ssl=True,
             verify_certs=True,
-            connection_class=RequestsHttpConnection
+            connection_class=RequestsHttpConnection,
+            timeout=30,
+            max_retries=3,
+            retry_on_timeout=True
         )
         try:
             self.docker_client = docker.from_env()
@@ -199,3 +202,35 @@ class ScoutAgent(Agent):
             body=json.dumps({"inputText": text})
         )
         return json.loads(response['body'].read())['embedding']
+    
+    @tool
+    def setup_opensearch_index(self) -> Dict:
+        """Create the user-preferences index if it doesn't exist"""
+        try:
+            # Check if index exists
+            if not self.os_client.indices.exists(index='user-preferences'):
+                # Create index with vector mapping
+                self.os_client.indices.create(
+                    index='user-preferences',
+                    body={
+                        "mappings": {
+                            "properties": {
+                                "user_id": {"type": "keyword"},
+                                "preference_text": {"type": "text"},
+                                "preference_vector": {
+                                    "type": "knn_vector",
+                                    "dimension": 1536,
+                                    "method": {
+                                        "name": "hnsw",
+                                        "space_type": "cosinesimil"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+                return {"status": "created", "index": "user-preferences"}
+            else:
+                return {"status": "exists", "index": "user-preferences"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}

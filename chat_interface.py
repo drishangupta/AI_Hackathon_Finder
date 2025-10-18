@@ -10,7 +10,7 @@ from scout_agent import ScoutAgent
 class ChatInterface:
     def __init__(self):
         self.scout = ScoutAgent()
-        self.bedrock = boto3.client('bedrock-runtime', region_name='ap-south-1')
+        self.bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
         
     def chat_with_bedrock(self, message: str) -> str:
         """Direct chat with Claude for general conversation"""
@@ -43,13 +43,26 @@ class ChatInterface:
                 print(f"❌ Error: {e}")
         
         elif user_input.startswith('/preferences'):
-            user_id = "test_user"
+            user_id = "New User"
             preferences = user_input.replace('/preferences', '').strip()
             
             print(f"💾 Storing preferences: {preferences}")
             try:
                 result = self.scout.store_user_preferences(user_id, preferences)
                 print(f"✅ Preferences stored for user: {result['user_id']}")
+            except Exception as e:
+                print(f"❌ Error: {e}")
+        
+        
+        # elif user_input.startswith('/embeddings'):
+        #     response = self.scout._generate_embedding("my preferences are of AWS Cloud and AI with all the related fields")
+        #     print(response)
+        
+        elif user_input.startswith('/setup'):
+            print("🔧 Setting up OpenSearch index...")
+            try:
+                result = self.scout.setup_opensearch_index()
+                print(f"✅ Index setup: {result}")
             except Exception as e:
                 print(f"❌ Error: {e}")
         
@@ -64,6 +77,7 @@ class ChatInterface:
         
         else:
             print("Available commands:")
+            print("  /setup - Setup OpenSearch index")
             print("  /discover [preferences] - Discover hackathons")
             print("  /preferences [text] - Store user preferences")
             print("  /chat [message] - Chat with Claude")

@@ -28,11 +28,14 @@ class NudgeAgent(Agent):
         auth = AWS4Auth(credentials.access_key, credentials.secret_key, region, 'aoss', session_token=credentials.token)
         
         self.opensearch = OpenSearch(
-            hosts=[{'host': 'your-collection-id.us-east-1.aoss.amazonaws.com', 'port': 443}],
+            hosts=[{'host': '5puu3iyv3d1lz41d7yp4.us-east-1.aoss.amazonaws.com', 'port': 443}],
             http_auth=auth,
             use_ssl=True,
             verify_certs=True,
-            connection_class=RequestsHttpConnection
+            connection_class=RequestsHttpConnection,
+            timeout=30,
+            max_retries=3,
+            retry_on_timeout=True
         )
     
     @tool
