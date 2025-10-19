@@ -107,7 +107,7 @@ os_client = OpenSearch(
 )
 
 class ScoutAgent(Agent):
-    def __init__(self, chat_id, model.user_id):
+    def __init__(self, chat_id, model,user_id):
         self.chat_id = chat_id
         self.user_id = user_id
         conversation_manager = SlidingWindowConversationManager(window_size=20)
