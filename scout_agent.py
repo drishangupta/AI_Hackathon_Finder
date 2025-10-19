@@ -11,7 +11,7 @@ import logging
 from strands import Agent, tool
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 # We now use http_request directly from strands_tools
-from strands_tools import http_request, file_read, file_write, use_aws,mem0_memory
+from strands_tools import http_request, file_read, file_write, use_aws
 from strands.models import BedrockModel
 
 logger = logging.getLogger()
@@ -32,7 +32,7 @@ You must classify the user's message and act accordingly:
 
 1.  **Get Context (For General Queries):**
     * Call `report_progress("Checking for user preferences...")`
-    * Call `mem0_memory(action="retrieve", query="user preferences, interests, topics")`. This will return semantically relevant memories.
+    * Call `get_user_preferences()`. This will return any saved preferences.
     * Call `report_progress("Getting list of trusted sources...")`
     * Call `get_trusted_sources()`. This returns a list of URLs.
     * **Loop** through each URL from `get_trusted_sources()` and proceed from Step 2.
@@ -122,11 +122,11 @@ class ScoutAgent(Agent):
             self.save_extraction_tool,
             self.execute_extraction_tool,
             self.store_hackathon_data,
-            # self.store_user_preferences,
+            self.store_user_preferences,
             self.save_api_endpoint,
             file_read,
             file_write,
-            self.mem0_json_memory
+            self.get_user_preferences
         ]
         
         super().__init__(
@@ -138,30 +138,6 @@ class ScoutAgent(Agent):
             # which will be Bedrock based on the boto3 clients
         )
 
-    @tool
-    def mem0_json_memory(action: str, query: str = "") -> str:
-        """
-        Wrapper around mem0_memory that forces JSON-only output.
-        Ensures Titan or Claude outputs are parseable by mem0.
-        """
-        # Step 1: inject a runtime JSON enforcement prompt
-        os.environ["MEM0_FORCE_JSON"] = "true"
-        os.environ["MEM0_SYSTEM_PROMPT"] = (
-            "You are a structured reasoning agent. Always return ONLY valid JSON. "
-            "No explanations, no extra text. Schema: "
-            '{"new_facts": [{"fact": "string", "source": "string"}]}'
-        )
-
-        # Step 2: call the original mem0 memory tool
-        result = mem0_memory(action=action, query=query)
-
-        # Step 3: sanitize output if model adds stray text before/after JSON
-        if not result.strip().startswith("{"):
-            result = re.sub(r'^[^{]*', '', result)
-        if not result.strip().endswith("}"):
-            result = re.sub(r'[^}]*$', '', result)
-
-        return result
     
     @tool
     def report_progress(self, message: str) -> str:
@@ -244,7 +220,6 @@ class ScoutAgent(Agent):
     # The agent will generate code itself and use the new `save_extraction_tool`
 
     # --- NEW TOOL ---
-    
     @tool
     def save_api_endpoint(self, source_url: str, strategy_json: str) -> str:
         """
@@ -372,32 +347,62 @@ class ScoutAgent(Agent):
             logger.error(f"ERROR storing data: {e}")
             return f"ERROR: Failed to store hackathon data: {e}"
 
-    # @tool
-    # def store_user_preferences(self, user_id: str, preference_text: str) -> str:
-    #     """Converts user preferences to an embedding and stores it in OpenSearch."""
-    #     try:
-    #         response = bedrock_client.invoke_model(
-    #             modelId="amazon.titan-embed-text-v1",
-    #             body=json.dumps({"inputText": preference_text})
-    #         )
-    #         embedding = json.loads(response['body'].read())['embedding']
+    @tool
+    def get_user_preferences(self) -> str:
+        """
+        Retrieves the user's stored preferences (as text) from the OpenSearch database.
+        Uses the agent's internal user_id.
+        """
+        try:
+            response = os_client.get(
+                index='user_preferences', # Same index name used in store_user_preferences
+                id=self.user_id
+            )
 
-    #         document = {
-    #             'user_id': user_id,
-    #             'preference_text': preference_text,
-    #             'preference_vector': embedding,
-    #             'timestamp': int(time.time())
-    #         }
-    #         os_client.index(
-    #             index='user_preferences',
-    #             body=document,
-    #             id=user_id,
-    #             refresh=True
-    #         )
-    #         return f"SUCCESS: Preferences for user {user_id} have been stored."
-    #     except Exception as e:
-    #         logger.error(f"ERROR storing preferences: {e}")
-    #         return f"ERROR: Failed to store preferences: {e}"
+            if response.get('_source'):
+                preference_text = response['_source'].get('preference_text', '')
+                if preference_text:
+                    logger.info(f"Retrieved preferences for user {self.user_id}: {preference_text}")
+                    return f"SUCCESS: Found user preferences: {preference_text}"
+
+            logger.info(f"No preferences found for user {self.user_id}.")
+            return "INFO: No preferences found for this user."
+
+        except Exception as e:
+            # Check specifically for OpenSearch's 'NotFoundError' which isn't a real error here
+            if 'NotFoundError' in str(type(e)):
+                logger.info(f"No preferences found for user {self.user_id}.")
+                return "INFO: No preferences found for this user."
+
+            logger.error(f"ERROR retrieving user preferences: {e}")
+            return f"ERROR: Could not retrieve user preferences: {e}"
+    
+    @tool
+    def store_user_preferences(self, user_id: str, preference_text: str) -> str:
+        """Converts user preferences to an embedding and stores it in OpenSearch."""
+        try:
+            response = bedrock_client.invoke_model(
+                modelId="amazon.titan-embed-text-v2:0",
+                body=json.dumps({"inputText": preference_text})
+            )
+            embedding = json.loads(response['body'].read())['embedding']
+
+            document = {
+                'user_id': user_id,
+                'preference_text': preference_text,
+                'preference_vector': embedding,
+                'timestamp': int(time.time())
+            }
+            os_client.index(
+                index='user_preferences',
+                body=document,
+                id=user_id,
+                refresh=True
+            )
+            return f"SUCCESS: Preferences for user {user_id} have been stored."
+        except Exception as e:
+            logger.error(f"ERROR storing preferences: {e}")
+            return f"ERROR: Failed to store preferences: {e}"
 
 
 # --- Main Execution Logic (Unchanged) ---
@@ -430,12 +435,21 @@ if __name__ == "__main__":
             logger.info("INFO: Task completed successfully.")
             
         except Exception as e:
-            logger.critical(f"FATAL_ERROR: {e}")
+            logger.critical(f"FATAL_ERROR in ECS Mode: {e}", exc_info=True) # Add exc_info for traceback
             if 'chat_id' in locals():
                 try:
-                    ScoutAgent(chat_id=chat_id).report_progress(f"❌ A fatal error occurred: {e}")
-                except:
-                    pass
+                    # Just send a raw SQS message. It's safer.
+                    response_queue_url = os.environ['RESPONSE_QUEUE_URL']
+                    payload = {
+                        'chat_id': chat_id,
+                        'message': f"❌ A fatal error occurred: {str(e)}" # Send only string
+                    }
+                    sqs_client.send_message(
+                        QueueUrl=response_queue_url,
+                        MessageBody=json.dumps(payload)
+                    )
+                except Exception as report_e:
+                    logger.error(f"Failed to report fatal error to user: {report_e}")
             sys.exit(1)
             
     else:

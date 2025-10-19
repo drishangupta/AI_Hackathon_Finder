@@ -207,6 +207,37 @@ Resources:
           }
         ]
 
+  DataAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: hackathon-hunter-data-policy # Policy names have stricter length limits
+      Type: data
+      Description: 'Allow ScoutAgentRole to read/write user_preferences index'
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "index",
+                "Resource": [
+                  "index/${OpenSearchCollection.Name}/*" 
+                ],
+                "Permission": [
+                  "aoss:CreateIndex",
+                  "aoss:DeleteIndex",
+                  "aoss:UpdateIndex",
+                  "aoss:DescribeIndex",
+                  "aoss:ReadDocument",
+                  "aoss:WriteDocument"
+                ]
+              }
+            ],
+            "Principal": [
+              "${ScoutAgentRole.Arn}"
+            ]
+          }
+        ]
+
   OpenSearchCollection:
     Type: AWS::OpenSearchServerless::Collection
     Properties:
