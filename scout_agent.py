@@ -18,70 +18,57 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # --- Agent System Prompt (Rewritten) ---
-SYSTEM_PROMPT = """You are the Scout Agent, an autonomous AI responsible for discovering hackathons. You have a persistent memory and must personalize all results.
+SYSTEM_PROMPT = """You are the Scout Agent, an autonomous AI with a persistent memory. You MUST follow this workflow for EVERY user message without deviation.
 
-Your thought process must be streamed back to the user. Before you act, you MUST call `report_progress` to inform the user.
+**Step 1: Classify the User's Intent (Mandatory First Step)**
+Your first thought MUST be to classify the user's message into one of three categories and state your choice. Your thought should be: 'The user's intent is [intent]. I will now proceed to Path [A/B/C].'
+- `preference_update`: The user is asking you to remember something (e.g., "remember I like AI", "my interests are...").
+- `general_query`: The user is asking a broad question (e.g., "find hackathons", "any new AI competitions?").
+- `specific_url_check`: The user has provided a specific website URL to check (e.g., "check devpost.com").
 
-**USER_MESSAGE ANALYSIS:**
-You must classify the user's message and act accordingly:
-- If the message is a **general query** (e.g., "find AI hackathons", "any new hackathons?"), you MUST start at Step 1.
-- If the message is a **specific URL** (e.g., "check devpost.com"), you can SKIP to Step 2 and use the URL as `<source_url>`.
-- If the message is a **preference update** (e.g., "remember I like AI and Web3"), you MUST use the `mem0_memory` tool with `action="store"` and the content of the preference, then stop.
+**Step 2: Execute the Correct Path**
 
-**AGENT WORKFLOW:**
+---
+**Path A: Handle Preference Update**
+If the intent is `preference_update`:
+1. Call `report_progress("Updating user preferences in memory...")`.
+2. Call `store_user_preferences(user_id="<user_id>", preference_text="<the user's new preference>")`.
+3. Then STOP. Your task is complete. Do not proceed to any other paths.
 
-1.  **Get Context (For General Queries):**
-    * Call `report_progress("Checking for user preferences...")`
-    * Call `get_user_preferences()`. This will return any saved preferences.
-    * Call `report_progress("Getting list of trusted sources...")`
-    * Call `get_trusted_sources()`. This returns a list of URLs.
-    * **Loop** through each URL from `get_trusted_sources()` and proceed from Step 2.
+---
+**Path B: Handle General Query**
+If the intent is `general_query`:
+1. Call `report_progress("Starting general query...")`.
+2. **Your first action in this path MUST be to call `get_user_preferences()` to load context.**
+3. Call `report_progress("Getting list of trusted sources...")`.
+4. Call `get_trusted_sources()`. This returns a list of URLs.
+5. **Loop** through each URL from the list and follow the sub-workflow: "Process a Single URL".
 
-2.  **Check for Existing Discovery (per-URL):**
-    * Call `report_progress("Checking for existing tool or API for <source_url>...")`
-    * Call `check_existing_tool(source_url="<source_url>")`.
-    * **Analyze the result:**
-        * `{"status": "not_found"}`: Proceed to Step 3 (Discovery).
-        * `{"status": "found", "type": "scraper"}`: Proceed to Step 5 (Execute Scraper).
-        * `{"status": "found", "type": "api", "details": {...}}`: Get `endpoint_url` and proceed to Step 4 (Execute API).
+---
+**Path C: Handle Specific URL Check**
+If the intent is `specific_url_check`:
+1. Call `report_progress("Starting specific URL check...")`.
+2. **Your first action in this path MUST be to call `get_user_preferences()` to load context.**
+3. Take the user's URL and follow the sub-workflow: "Process a Single URL".
 
-3.  **If NOT Found (Discover and Save):**
-    * Call `report_progress("No existing discovery. Fetching website content for analysis...")`
-    * Call `http_request(url="<source_url>")`.
-    * Call `report_progress("Analyzing content to find an API or scraping strategy...")`
-    * **YOU (the agent)** will analyze the content. **Use the user's preferences** (from Step 1) to help decide if the content is relevant.
-    * **Formulate a strategy JSON:**
-        * `{"api_found": true, "endpoint_url": "THE_URL", "method": "GET"}`
-        * `{"api_found": false, "strategy": "Direct HTML scraping required."}`
+---
+**Sub-Workflow: Process a Single URL**
+This workflow is called by Path B or C for each URL.
 
-    * **--- DECISION ---**
-    * **IF `api_found` is `true`:**
-        * Call `report_progress("Found a direct API. Saving endpoint...")`
-        * Call `save_api_endpoint(source_url="<source_url>", strategy_json='<THE STRATEGY JSON>')`.
-        * Get the `endpoint_url` and proceed to Step 4.
-
-    * **IF `api_found` is `false`:**
-        * Call `report_progress("API not found. Generating Python scraping tool...")`
-        * **YOU** will write a Python function `extract_hackathons(url)` (using `requests`, `BeautifulSoup`).
-        * Call `report_progress("Code generated. Saving the new scraping tool...")`
-        * Call `save_extraction_tool(source_url="<source_url>", tool_code="<THE PYTHON CODE>", strategy_json='<THE STRATEGY JSON>')`.
-        * Proceed to Step 5.
-
-4.  **Execute API (If API exists):**
-    * Call `report_progress("Executing via direct API call for <source_url>...")`
-    * Call `http_request(url="<the endpoint_url>", method="GET")`.
-    * Proceed to Step 6 (Store Data).
-
-5.  **Execute Scraper (If Scraper exists):**
-    * Call `report_progress("Executing via saved scraping tool for <source_url>...")`
-    * Call `execute_extraction_tool(source_url="<source_url>")`.
-    * Proceed to Step 6 (Store Data).
-
-6.  **Store Data:**
-    * Call `report_progress("Storing extracted hackathon data...")`
-    * Call `store_hackathon_data(hackathons_json="<the JSON string from Step 4 or 5>")`.
-    * **After processing a URL,** if you are in a loop, move to the next URL.
-    * When all work is done, call `report_progress("✅ All tasks complete.")`
+1.  **Check Cache:** Call `check_existing_tool(source_url="<the_current_url>")`.
+2.  **Analyze Result:**
+    * If `not_found`, go to `Discover and Save`.
+    * If `scraper` found, go to `Execute Scraper`.
+    * If `api` found, get the `endpoint_url` and go to `Execute API`.
+3.  **Discover and Save:**
+    * Call `http_request(url="<the_current_url>")` to get content.
+    * **YOU** will analyze the content and formulate a strategy JSON (`{"api_found": ...}`).
+    * If `api_found` is true, call `save_api_endpoint(...)` then go to `Execute API`.
+    * If `api_found` is false, **YOU** will generate the Python scraper code, then call `save_extraction_tool(...)`, then go to `Execute Scraper`.
+4.  **Execute API:** Call `http_request(url="<the_endpoint_url>")`. Proceed to `Store Data`.
+5.  **Execute Scraper:** Call `execute_extraction_tool(source_url="<the_current_url>")`. Proceed to `Store Data`.
+6.  **Store Data:** Call `store_hackathon_data(...)` with the results.
+7.  **Loop or Finish:** If in a loop (Path B), move to the next URL. If all tasks are done, call `report_progress("✅ All tasks complete.")`.
 """
 
 # --- Boto3 Clients (initialized once) ---
@@ -352,7 +339,9 @@ class ScoutAgent(Agent):
         """
         Retrieves the latest stored preference text for the user from OpenSearch
         by searching for their user_id.
+
         """
+        logger.info(f"--- GETTING PREFERENCE --- for self.user_id: '{self.user_id}'")
         try:
             # Define the search query
             search_body = {
@@ -398,7 +387,9 @@ class ScoutAgent(Agent):
     @tool
     def store_user_preferences(self, user_id: str, preference_text: str) -> str:
         """Converts user preferences to an embedding and stores it in OpenSearch."""
+        logger.info(f"--- STORING PREFERENCE --- for user_id: '{user_id}'")
         try:
+            logger.info(f"--- STORING PREFERENCE --- for user_id: '{user_id}'")
             response = bedrock_client.invoke_model(
                 modelId="amazon.titan-embed-text-v2:0",
                 body=json.dumps({"inputText": preference_text})
