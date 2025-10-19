@@ -157,7 +157,23 @@ Resources:
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
     DeletionPolicy: Retain
-  
+
+  ProcessedMessagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-ProcessedMessages'
+      AttributeDefinitions:
+        - AttributeName: message_id # Use Telegram's unique message ID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: message_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl_timestamp # Attribute to store the expiration time
+        Enabled: true
+    DeletionPolicy: Delete
+
   KnowledgeBaseBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -188,10 +204,10 @@ Resources:
   NetworkSecurityPolicy:
     Type: AWS::OpenSearchServerless::SecurityPolicy
     Properties:
-      Name: hh-net-policy
+      Name: hh-net-policy-3
       Type: network
       Policy: |
-        [
+          [
           {
             "Rules": [
               {
@@ -205,12 +221,12 @@ Resources:
             ],
             "AllowFromPublic": true
           }
-        ]
+          ]
 
   DataAccessPolicy:
     Type: AWS::OpenSearchServerless::AccessPolicy
     Properties:
-      Name: hackathon-hunter-data-policy # Policy names have stricter length limits
+      Name: hh-data-policy # Policy names have stricter length limits
       Type: data
       Description: 'Allow ScoutAgentRole to read/write user_preferences index'
       Policy: !Sub |
@@ -220,7 +236,7 @@ Resources:
               {
                 "ResourceType": "index",
                 "Resource": [
-                  "index/${OpenSearchCollection.Name}/*" 
+                  "index/hackathon-hunter/*" 
                 ],
                 "Permission": [
                   "aoss:CreateIndex",
@@ -230,6 +246,15 @@ Resources:
                   "aoss:ReadDocument",
                   "aoss:WriteDocument"
                 ]
+              },
+              { 
+                  "ResourceType": "collection",
+                  "Resource": [
+                      "collection/hackathon-hunter"
+                  ],
+                  "Permission": [
+                      "aoss:*" 
+                  ]
               }
             ],
             "Principal": [
@@ -359,6 +384,9 @@ Resources:
               - Effect: Allow
                 Action: ['sqs:ReceiveMessage', 'sqs:DeleteMessage', 'sqs:GetQueueAttributes']
                 Resource: !GetAtt ScoutResponseQueue.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt ProcessedMessagesTable.Arn
 
   # --- 4. COMPUTE & API ---
   DependenciesLayer:
@@ -488,7 +516,7 @@ Resources:
           USER_INTERESTS_TABLE: !Ref UserInterestsTable
           KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
           RESPONSE_QUEUE_URL: !Ref ScoutResponseQueue
-          OPENSEARCH_ENDPOINT: !GetAtt OpenSearchCollection.CollectionEndpoint
+          PROCESSED_MESSAGES_TABLE: !Ref ProcessedMessagesTable
       Code:
         # Code is deployed via deploy.py
         ZipFile: |

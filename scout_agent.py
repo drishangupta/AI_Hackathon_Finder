@@ -350,31 +350,49 @@ class ScoutAgent(Agent):
     @tool
     def get_user_preferences(self) -> str:
         """
-        Retrieves the user's stored preferences (as text) from the OpenSearch database.
-        Uses the agent's internal user_id.
+        Retrieves the latest stored preference text for the user from OpenSearch
+        by searching for their user_id.
         """
         try:
-            response = os_client.get(
-                index='user_preferences', # Same index name used in store_user_preferences
-                id=self.user_id
+            # Define the search query
+            search_body = {
+                "size": 1, # We only need the latest one
+                "query": {
+                    "term": {
+                        # Assumes your user_id field mapping is keyword or text with keyword subfield
+                        "user_id.keyword": self.user_id
+                    }
+                },
+                "sort": [
+                    {"timestamp": {"order": "desc"}} # Get the most recent document
+                ]
+            }
+
+            # Execute the search
+            response = os_client.search(
+                index='user_preferences',
+                body=search_body
             )
 
-            if response.get('_source'):
-                preference_text = response['_source'].get('preference_text', '')
+            hits = response['hits']['hits']
+            if hits:
+                # Extract the preference text from the latest document
+                preference_text = hits[0]['_source'].get('preference_text', '')
                 if preference_text:
-                    logger.info(f"Retrieved preferences for user {self.user_id}: {preference_text}")
+                    logger.info(f"Retrieved latest preferences for user {self.user_id}: {preference_text}")
                     return f"SUCCESS: Found user preferences: {preference_text}"
 
+            # If no hits or no text in the hit
             logger.info(f"No preferences found for user {self.user_id}.")
             return "INFO: No preferences found for this user."
 
         except Exception as e:
-            # Check specifically for OpenSearch's 'NotFoundError' which isn't a real error here
-            if 'NotFoundError' in str(type(e)):
-                logger.info(f"No preferences found for user {self.user_id}.")
-                return "INFO: No preferences found for this user."
+            # Handle potential index not found error during search gracefully
+            if 'index_not_found_exception' in str(e):
+                 logger.info(f"Index 'user_preferences' not found for user {self.user_id}. No preferences stored yet.")
+                 return "INFO: No preferences found for this user."
 
-            logger.error(f"ERROR retrieving user preferences: {e}")
+            logger.error(f"ERROR retrieving user preferences for user {self.user_id}: {e}", exc_info=True)
             return f"ERROR: Could not retrieve user preferences: {e}"
     
     @tool
@@ -396,8 +414,6 @@ class ScoutAgent(Agent):
             os_client.index(
                 index='user_preferences',
                 body=document,
-                id=user_id,
-                refresh=True
             )
             return f"SUCCESS: Preferences for user {user_id} have been stored."
         except Exception as e:
