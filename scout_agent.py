@@ -7,47 +7,69 @@ import time
 import re
 from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_aws4auth import AWS4Auth
-
+import logging
 from strands import Agent, tool
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 # We now use http_request directly from strands_tools
 from strands_tools import http_request, file_read, file_write, use_aws
 from strands.models import BedrockModel
 
-# --- Agent System Prompt (Rewritten) ---
-SYSTEM_PROMPT = """You are the Scout Agent, an autonomous AI responsible for discovering hackathons. Your primary mission is to analyze websites, create tools to extract data, and report your progress. You must use the provided tools in a logical sequence.
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
-Your thought process must be streamed back to the user. Before you perform any significant action (like checking a tool, analyzing HTML, or generating code), you MUST call the `report_progress` tool to inform the user what you are about to do.
+# --- Agent System Prompt (Rewritten) ---
+SYSTEM_PROMPT = """You are the Scout Agent, an autonomous AI responsible for discovering hackathons. Your primary mission is to analyze websites, create tools, and extract data. You must be as efficient as possible.
+
+Your thought process must be streamed back to the user. Before you act, you MUST call `report_progress` to inform the user.
 
 **AGENT WORKFLOW:**
 
-1.  **Check for Existing Tool:**
-    * Call `report_progress("Checking for existing tool for <source_url>...")`
-    * Call `check_existing_tool(source_url="<source_url>")`.
+1.  **Check for Existing Discovery:**
+    * Call `report_progress("Checking for existing tool or API for <source_url>...")`
+    * Call `check_existing_tool(source_url="<source_url>")`. This tool will return a JSON string.
+    * **Analyze the JSON result:**
+        * `{"status": "not_found"}`: Proceed to Step 2 (Discovery).
+        * `{"status": "found", "type": "scraper"}`: Proceed to Step 4 (Execute Scraper).
+        * `{"status": "found", "type": "api", "details": {...}}`: Get the `endpoint_url` from `details` and proceed to Step 3 (Execute API).
 
-2.  **If Tool is NOT Found (Analyze and Build):**
-    * Call `report_progress("No tool found. Fetching website content for analysis...")`
-    * Call `http_request(url="<source_url>")` to get the raw HTML/JSON content.
+2.  **If NOT Found (Discover and Save):**
+    * Call `report_progress("No existing discovery. Fetching website content for analysis...")`
+    * Call `http_request(url="<source_url>")` to get the raw HTML/JSON.
     * Call `report_progress("Analyzing content to find an API or scraping strategy...")`
-    * **YOU (the agent)** will now *directly analyze* the content from the `http_request`. Your goal is to find a hidden JSON API (like in `<script>` tags or JS variables).
-    * **Based on your analysis, you must formulate a strategy JSON object.**
-        * If API found: `{"api_found": true, "endpoint_url": "THE_URL", "method": "GET", "notes": "Found API endpoint X, seems to return JSON list of hackathons."}`
-        * If no API: `{"api_found": false, "strategy": "Direct HTML scraping required. Hackathons are in <div> tags with class 'hackathon-card'."}`
-    * Call `report_progress("Strategy formulated. Generating Python extraction tool...")`
+    * **YOU (the agent)** will now *directly analyze* the content.
+    * **Based on your analysis, you must formulate a strategy JSON object:**
+        * `{"api_found": true, "endpoint_url": "THE_URL", "method": "GET"}`
+        * `{"api_found": false, "strategy": "Direct HTML scraping required."}`
 
-3.  **Generate Extraction Tool (Code Generation):**
-    * **YOU (the agent)** will now *directly write the Python code* for a function `extract_hackathons(url)`.
-    * This function MUST import `requests` and `BeautifulSoup` (if scraping).
-    * It must return a list of dictionaries, e.g., `[{"title": "...", "deadline": "...", "prize": "..."}]`.
-    * **You must output ONLY the raw Python code for the function, wrapped in ```python ... ```.**
-    * Call `report_progress("Code generated. Saving the new tool to the database...")`
-    * Call `save_extraction_tool(source_url="<source_url>", tool_code="<THE PYTHON CODE YOU JUST WROTE>", strategy_json='<THE STRATEGY JSON YOU FORMULATED>')`.
+    * **--- DECISION ---**
+    * **IF `api_found` is `true`:**
+        * Call `report_progress("Found a direct API. Saving endpoint...")`
+        * Call `save_api_endpoint(source_url="<source_url>", strategy_json='<THE STRATEGY JSON YOU FORMULATED>')`.
+        * Get the `endpoint_url` from the strategy and proceed to Step 3 (Execute API).
 
-4.  **Execute and Store:**
-    * Call `report_progress("Executing the tool to extract data...")`
+    * **IF `api_found` is `false`:**
+        * Call `report_progress("API not found. Generating Python scraping tool...")`
+        * **YOU (the agent)** will write a Python function `extract_hackathons(url)` using `requests` and `BeautifulSoup`.
+        * It MUST return a list of dictionaries, e.g., `[{"title": "...", "deadline": "...", "prize": "..."}]`.
+        * Call `report_progress("Code generated. Saving the new scraping tool...")`
+        * Call `save_extraction_tool(source_url="<source_url>", tool_code="<THE PYTHON CODE YOU WROTE>", strategy_json='<THE STRATEGY JSON YOU FORMULATED>')`.
+        * Proceed to Step 4 (Execute Scraper).
+
+3.  **Execute API (If API exists):**
+    * Call `report_progress("Executing via direct API call...")`
+    * Call `http_request(url="<the endpoint_url>", method="GET")`.
+    * The result will be a JSON string of hackathons.
+    * Proceed to Step 5 (Store Data).
+
+4.  **Execute Scraper (If Scraper exists):**
+    * Call `report_progress("Executing via saved scraping tool...")`
     * Call `execute_extraction_tool(source_url="<source_url>")`.
+    * The result will be a JSON string of hackathons.
+    * Proceed to Step 5 (Store Data).
+
+5.  **Store Data:**
     * Call `report_progress("Storing extracted hackathon data...")`
-    * Call `store_hackathon_data(hackathons_json="<result from execute_extraction_tool>")`.
+    * Call `store_hackathon_data(hackathons_json="<the JSON string from Step 3 or 4>")`.
     * Call `report_progress("✅ All tasks complete.")`
 """
 
@@ -90,6 +112,7 @@ class ScoutAgent(Agent):
             self.execute_extraction_tool,
             self.store_hackathon_data,
             self.store_user_preferences,
+            self.save_api_endpoint,
             file_read,
             file_write
         ]
@@ -118,7 +141,7 @@ class ScoutAgent(Agent):
             )
             return "Progress reported to the user."
         except Exception as e:
-            print(f"ERROR reporting progress: {e}")
+            logger.error(f"ERROR reporting progress: {e}")
             return "Failed to report progress."
 
     @tool
@@ -133,25 +156,49 @@ class ScoutAgent(Agent):
             sources = [result['content']['text'] for result in response['retrievalResults']]
             return "\n".join(sources)
         except Exception as e:
-            print(f"ERROR getting trusted sources: {e}")
+            logger.error(f"ERROR getting trusted sources: {e}")
             return "Failed to retrieve trusted sources. Using fallback: devpost.com"
 
     @tool
     def check_existing_tool(self, source_url: str) -> str:
-        """Checks if a data extraction tool already exists for a given URL in DynamoDB."""
+        """
+        Checks if a data extraction tool or API endpoint already exists for a given URL.
+        Returns JSON describing what was found.
+        """
         try:
             table_name = os.environ['SCRAPER_FUNCTIONS_TABLE']
             response = dynamodb_client.get_item(
                 TableName=table_name,
                 Key={'source_url': {'S': source_url}}
             )
-            if 'Item' in response:
-                return f"SUCCESS: Found existing tool for {source_url}."
+            
+            if 'Item' not in response:
+                logger.info(f"No existing tool found for {source_url}.")
+                return json.dumps({"status": "not_found"})
+
+            item = response['Item']
+            function_type = item.get('function_type', {}).get('S')
+
+            if function_type == 'scraper':
+                logger.info(f"Found existing 'scraper' tool for {source_url}.")
+                return json.dumps({"status": "found", "type": "scraper"})
+            
+            elif function_type == 'api_endpoint':
+                api_details_str = item.get('api_details', {}).get('S', '{}')
+                logger.info(f"Found existing 'api_endpoint' for {source_url}.")
+                return json.dumps({
+                    "status": "found", 
+                    "type": "api", 
+                    "details": json.loads(api_details_str)
+                })
+            
             else:
-                return f"INFO: No existing tool found for {source_url}."
+                logger.warning(f"Found item for {source_url} but with unknown type: {function_type}")
+                return json.dumps({"status": "not_found"})
+
         except Exception as e:
-            print(f"ERROR checking for existing tool: {e}")
-            return f"ERROR: Could not check for existing tool: {e}"
+            logger.error(f"ERROR checking for existing tool: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
 
     # --- DELETED `discover_api_or_scraper_strategy` ---
     # The agent will do this logic itself using `http_request` and its own reasoning
@@ -160,16 +207,47 @@ class ScoutAgent(Agent):
     # The agent will generate code itself and use the new `save_extraction_tool`
 
     # --- NEW TOOL ---
+    
     @tool
-    def save_extraction_tool(self, source_url: str, tool_code: str, strategy_json: str) -> str:
+    def save_api_endpoint(self, source_url: str, strategy_json: str) -> str:
         """
-        Saves a newly generated Python tool (as a string) to the Scraper Functions DynamoDB table.
-        The agent must generate the code *first* and then pass it to this tool.
+        Saves a discovered API endpoint (as a JSON string) to the Scraper Functions DynamoDB table.
+        Use this when an API is found, instead of generating code.
         """
         try:
             strategy = json.loads(strategy_json)
-            
-            # Clean up the code to remove markdown fences if the agent added them
+            if not strategy.get("api_found"):
+                return "ERROR: This tool is only for saving API endpoints. strategy_json must have 'api_found': true."
+
+            table_name = os.environ['SCRAPER_FUNCTIONS_TABLE']
+            dynamodb_client.put_item(
+                TableName=table_name,
+                Item={
+                    'source_url': {'S': source_url},
+                    'api_details': {'S': strategy_json},
+                    'function_type': {'S': 'api_endpoint'},
+                    'last_updated_timestamp': {'N': str(int(time.time()))}
+                }
+            )
+            logger.info(f"SUCCESS: Saved API endpoint for {source_url}.")
+            return f"SUCCESS: Saved API endpoint for {source_url}."
+        except Exception as e:
+            logger.error(f"ERROR saving API endpoint: {e}")
+            return f"ERROR: Failed to save API endpoint: {e}"
+    
+    
+    @tool
+    def save_extraction_tool(self, source_url: str, tool_code: str, strategy_json: str) -> str:
+        """
+        Saves a newly generated Python *scraping* tool to the Scraper Functions DynamoDB table.
+        Use this ONLY when a scraper function is generated (i.e., api_found is false).
+        """
+        try:
+            strategy = json.loads(strategy_json)
+            if strategy.get("api_found"):
+                return "ERROR: This tool is for saving scrapers. Use 'save_api_endpoint' for APIs."
+
+            # Clean up the code to remove markdown fences
             if "```python" in tool_code:
                 tool_code = tool_code.split("```python")[1].split("```")[0].strip()
             
@@ -179,14 +257,16 @@ class ScoutAgent(Agent):
                 Item={
                     'source_url': {'S': source_url},
                     'scraper_code': {'S': tool_code},
-                    'function_type': {'S': 'api' if strategy.get("api_found") else 'scraper'},
+                    'strategy_details': {'S': strategy_json}, # Store the strategy too
+                    'function_type': {'S': 'scraper'}, # Explicitly 'scraper'
                     'last_updated_timestamp': {'N': str(int(time.time()))}
                 }
             )
-            return f"SUCCESS: Generated and saved tool for {source_url}."
+            logger.info(f"SUCCESS: Generated and saved scraping tool for {source_url}.")
+            return f"SUCCESS: Generated and saved scraping tool for {source_url}."
         except Exception as e:
-            print(f"ERROR saving tool: {e}")
-            return f"ERROR: Failed to save tool: {e}"
+            logger.error(f"ERROR saving extraction tool: {e}")
+            return f"ERROR: Failed to save extraction tool: {e}"
     
     @tool
     def execute_extraction_tool(self, source_url: str) -> str:
@@ -215,10 +295,10 @@ class ScoutAgent(Agent):
             if isinstance(hackathons, list) and all(isinstance(i, dict) for i in hackathons):
                 return json.dumps(hackathons)
             else:
-                 return json.dumps([{"error": "Scraper did not return a valid list of dictionaries."}])
+                return json.dumps([{"error": "Scraper did not return a valid list of dictionaries."}])
 
         except Exception as e:
-            print(f"ERROR executing tool: {e}")
+            logger.error(f"ERROR executing tool: {e}")
             return json.dumps([{"error": f"Failed to execute tool: {e}"}])
 
     @tool
@@ -252,7 +332,7 @@ class ScoutAgent(Agent):
                     })
             return f"SUCCESS: Stored {len(hackathons)} hackathons."
         except Exception as e:
-            print(f"ERROR storing data: {e}")
+            logger.error(f"ERROR storing data: {e}")
             return f"ERROR: Failed to store hackathon data: {e}"
 
     @tool
@@ -279,7 +359,7 @@ class ScoutAgent(Agent):
             )
             return f"SUCCESS: Preferences for user {user_id} have been stored."
         except Exception as e:
-            print(f"ERROR storing preferences: {e}")
+            logger.error(f"ERROR storing preferences: {e}")
             return f"ERROR: Failed to store preferences: {e}"
 
 
@@ -293,7 +373,7 @@ if __name__ == "__main__":
             chat_id = os.environ['CHAT_ID']
             user_id = hashlib.md5(chat_id.encode()).hexdigest()
             
-            print(f"INFO: Initializing Scout Agent for chat_id: {chat_id}")
+            logger.info(f"INFO: Initializing Scout Agent for chat_id: {chat_id}")
             # We must configure the agent to use Bedrock
             # This is automatically handled by Strands if boto3 is configured
             # but we'll explicitly set the model for clarity.
@@ -310,10 +390,10 @@ if __name__ == "__main__":
             final_response = agent(user_message)
             
             agent.report_progress(f"✅ Task Complete. Final summary: {final_response}")
-            print("INFO: Task completed successfully.")
+            logger.info("INFO: Task completed successfully.")
             
         except Exception as e:
-            print(f"FATAL_ERROR: {e}")
+            logger.critical(f"FATAL_ERROR: {e}")
             if 'chat_id' in locals():
                 try:
                     ScoutAgent(chat_id=chat_id).report_progress(f"❌ A fatal error occurred: {e}")
