@@ -11,66 +11,77 @@ import logging
 from strands import Agent, tool
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 # We now use http_request directly from strands_tools
-from strands_tools import http_request, file_read, file_write, use_aws
+from strands_tools import http_request, file_read, file_write, use_aws,mem0_memory
 from strands.models import BedrockModel
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # --- Agent System Prompt (Rewritten) ---
-SYSTEM_PROMPT = """You are the Scout Agent, an autonomous AI responsible for discovering hackathons. Your primary mission is to analyze websites, create tools, and extract data. You must be as efficient as possible.
+SYSTEM_PROMPT = """You are the Scout Agent, an autonomous AI responsible for discovering hackathons. You have a persistent memory and must personalize all results.
 
 Your thought process must be streamed back to the user. Before you act, you MUST call `report_progress` to inform the user.
 
+**USER_MESSAGE ANALYSIS:**
+You must classify the user's message and act accordingly:
+- If the message is a **general query** (e.g., "find AI hackathons", "any new hackathons?"), you MUST start at Step 1.
+- If the message is a **specific URL** (e.g., "check devpost.com"), you can SKIP to Step 2 and use the URL as `<source_url>`.
+- If the message is a **preference update** (e.g., "remember I like AI and Web3"), you MUST use the `mem0_memory` tool with `action="store"` and the content of the preference, then stop.
+
 **AGENT WORKFLOW:**
 
-1.  **Check for Existing Discovery:**
-    * Call `report_progress("Checking for existing tool or API for <source_url>...")`
-    * Call `check_existing_tool(source_url="<source_url>")`. This tool will return a JSON string.
-    * **Analyze the JSON result:**
-        * `{"status": "not_found"}`: Proceed to Step 2 (Discovery).
-        * `{"status": "found", "type": "scraper"}`: Proceed to Step 4 (Execute Scraper).
-        * `{"status": "found", "type": "api", "details": {...}}`: Get the `endpoint_url` from `details` and proceed to Step 3 (Execute API).
+1.  **Get Context (For General Queries):**
+    * Call `report_progress("Checking for user preferences...")`
+    * Call `mem0_memory(action="retrieve", query="user preferences, interests, topics")`. This will return semantically relevant memories.
+    * Call `report_progress("Getting list of trusted sources...")`
+    * Call `get_trusted_sources()`. This returns a list of URLs.
+    * **Loop** through each URL from `get_trusted_sources()` and proceed from Step 2.
 
-2.  **If NOT Found (Discover and Save):**
+2.  **Check for Existing Discovery (per-URL):**
+    * Call `report_progress("Checking for existing tool or API for <source_url>...")`
+    * Call `check_existing_tool(source_url="<source_url>")`.
+    * **Analyze the result:**
+        * `{"status": "not_found"}`: Proceed to Step 3 (Discovery).
+        * `{"status": "found", "type": "scraper"}`: Proceed to Step 5 (Execute Scraper).
+        * `{"status": "found", "type": "api", "details": {...}}`: Get `endpoint_url` and proceed to Step 4 (Execute API).
+
+3.  **If NOT Found (Discover and Save):**
     * Call `report_progress("No existing discovery. Fetching website content for analysis...")`
-    * Call `http_request(url="<source_url>")` to get the raw HTML/JSON.
+    * Call `http_request(url="<source_url>")`.
     * Call `report_progress("Analyzing content to find an API or scraping strategy...")`
-    * **YOU (the agent)** will now *directly analyze* the content.
-    * **Based on your analysis, you must formulate a strategy JSON object:**
+    * **YOU (the agent)** will analyze the content. **Use the user's preferences** (from Step 1) to help decide if the content is relevant.
+    * **Formulate a strategy JSON:**
         * `{"api_found": true, "endpoint_url": "THE_URL", "method": "GET"}`
         * `{"api_found": false, "strategy": "Direct HTML scraping required."}`
 
     * **--- DECISION ---**
     * **IF `api_found` is `true`:**
         * Call `report_progress("Found a direct API. Saving endpoint...")`
-        * Call `save_api_endpoint(source_url="<source_url>", strategy_json='<THE STRATEGY JSON YOU FORMULATED>')`.
-        * Get the `endpoint_url` from the strategy and proceed to Step 3 (Execute API).
+        * Call `save_api_endpoint(source_url="<source_url>", strategy_json='<THE STRATEGY JSON>')`.
+        * Get the `endpoint_url` and proceed to Step 4.
 
     * **IF `api_found` is `false`:**
         * Call `report_progress("API not found. Generating Python scraping tool...")`
-        * **YOU (the agent)** will write a Python function `extract_hackathons(url)` using `requests` and `BeautifulSoup`.
-        * It MUST return a list of dictionaries, e.g., `[{"title": "...", "deadline": "...", "prize": "..."}]`.
+        * **YOU** will write a Python function `extract_hackathons(url)` (using `requests`, `BeautifulSoup`).
         * Call `report_progress("Code generated. Saving the new scraping tool...")`
-        * Call `save_extraction_tool(source_url="<source_url>", tool_code="<THE PYTHON CODE YOU WROTE>", strategy_json='<THE STRATEGY JSON YOU FORMULATED>')`.
-        * Proceed to Step 4 (Execute Scraper).
+        * Call `save_extraction_tool(source_url="<source_url>", tool_code="<THE PYTHON CODE>", strategy_json='<THE STRATEGY JSON>')`.
+        * Proceed to Step 5.
 
-3.  **Execute API (If API exists):**
-    * Call `report_progress("Executing via direct API call...")`
+4.  **Execute API (If API exists):**
+    * Call `report_progress("Executing via direct API call for <source_url>...")`
     * Call `http_request(url="<the endpoint_url>", method="GET")`.
-    * The result will be a JSON string of hackathons.
-    * Proceed to Step 5 (Store Data).
+    * Proceed to Step 6 (Store Data).
 
-4.  **Execute Scraper (If Scraper exists):**
-    * Call `report_progress("Executing via saved scraping tool...")`
+5.  **Execute Scraper (If Scraper exists):**
+    * Call `report_progress("Executing via saved scraping tool for <source_url>...")`
     * Call `execute_extraction_tool(source_url="<source_url>")`.
-    * The result will be a JSON string of hackathons.
-    * Proceed to Step 5 (Store Data).
+    * Proceed to Step 6 (Store Data).
 
-5.  **Store Data:**
+6.  **Store Data:**
     * Call `report_progress("Storing extracted hackathon data...")`
-    * Call `store_hackathon_data(hackathons_json="<the JSON string from Step 3 or 4>")`.
-    * Call `report_progress("✅ All tasks complete.")`
+    * Call `store_hackathon_data(hackathons_json="<the JSON string from Step 4 or 5>")`.
+    * **After processing a URL,** if you are in a loop, move to the next URL.
+    * When all work is done, call `report_progress("✅ All tasks complete.")`
 """
 
 # --- Boto3 Clients (initialized once) ---
@@ -96,8 +107,9 @@ os_client = OpenSearch(
 )
 
 class ScoutAgent(Agent):
-    def __init__(self, chat_id, model):
+    def __init__(self, chat_id, model.user_id):
         self.chat_id = chat_id
+        self.user_id = user_id
         conversation_manager = SlidingWindowConversationManager(window_size=20)
         
         # --- Tool List (Rewritten) ---
@@ -111,10 +123,11 @@ class ScoutAgent(Agent):
             self.save_extraction_tool,
             self.execute_extraction_tool,
             self.store_hackathon_data,
-            self.store_user_preferences,
+            # self.store_user_preferences,
             self.save_api_endpoint,
             file_read,
-            file_write
+            file_write,
+            mem0_memory
         ]
         
         super().__init__(
@@ -335,32 +348,32 @@ class ScoutAgent(Agent):
             logger.error(f"ERROR storing data: {e}")
             return f"ERROR: Failed to store hackathon data: {e}"
 
-    @tool
-    def store_user_preferences(self, user_id: str, preference_text: str) -> str:
-        """Converts user preferences to an embedding and stores it in OpenSearch."""
-        try:
-            response = bedrock_client.invoke_model(
-                modelId="amazon.titan-embed-text-v1",
-                body=json.dumps({"inputText": preference_text})
-            )
-            embedding = json.loads(response['body'].read())['embedding']
+    # @tool
+    # def store_user_preferences(self, user_id: str, preference_text: str) -> str:
+    #     """Converts user preferences to an embedding and stores it in OpenSearch."""
+    #     try:
+    #         response = bedrock_client.invoke_model(
+    #             modelId="amazon.titan-embed-text-v1",
+    #             body=json.dumps({"inputText": preference_text})
+    #         )
+    #         embedding = json.loads(response['body'].read())['embedding']
 
-            document = {
-                'user_id': user_id,
-                'preference_text': preference_text,
-                'preference_vector': embedding,
-                'timestamp': int(time.time())
-            }
-            os_client.index(
-                index='user_preferences',
-                body=document,
-                id=user_id,
-                refresh=True
-            )
-            return f"SUCCESS: Preferences for user {user_id} have been stored."
-        except Exception as e:
-            logger.error(f"ERROR storing preferences: {e}")
-            return f"ERROR: Failed to store preferences: {e}"
+    #         document = {
+    #             'user_id': user_id,
+    #             'preference_text': preference_text,
+    #             'preference_vector': embedding,
+    #             'timestamp': int(time.time())
+    #         }
+    #         os_client.index(
+    #             index='user_preferences',
+    #             body=document,
+    #             id=user_id,
+    #             refresh=True
+    #         )
+    #         return f"SUCCESS: Preferences for user {user_id} have been stored."
+    #     except Exception as e:
+    #         logger.error(f"ERROR storing preferences: {e}")
+    #         return f"ERROR: Failed to store preferences: {e}"
 
 
 # --- Main Execution Logic (Unchanged) ---
@@ -386,7 +399,7 @@ if __name__ == "__main__":
             )
 
             # Pass the model object during initialization
-            agent = ScoutAgent(chat_id=chat_id, model=bedrock_model)
+            agent = ScoutAgent(chat_id=chat_id, model=bedrock_model,user_id=user_id)
             final_response = agent(user_message)
             
             agent.report_progress(f"✅ Task Complete. Final summary: {final_response}")
