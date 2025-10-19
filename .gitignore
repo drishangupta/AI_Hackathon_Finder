@@ -10,3 +10,4 @@ api_analysis.json
 scraper_*.py
 user_prefs_*.json
 hackathons_*.json
+q-dev*

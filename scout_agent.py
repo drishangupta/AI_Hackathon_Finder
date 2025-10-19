@@ -10,6 +10,8 @@ from requests_aws4auth import AWS4Auth
 
 from strands import Agent, tool
 from strands.agent.conversation_manager import SlidingWindowConversationManager
+from strands_tools import http_request, file_read, file_write, use_aws
+
 
 # --- Agent System Prompt ---
 SYSTEM_PROMPT = """You are the Scout Agent, an autonomous AI responsible for discovering hackathons. Your primary mission is to analyze websites, create tools to extract data, and report your progress. You must use the provided tools in a logical sequence.
@@ -18,11 +20,12 @@ Your thought process must be streamed back to the user. Before you perform any s
 
 Example workflow:
 1. User asks to find hackathons on "newsite.com".
-2. You think: "First, I need to report that I'm checking for an existing tool for this site." -> Call `report_progress("Checking for an existing tool for newsite.com...")`
-3. You think: "Now I will actually check." -> Call `check_existing_tool("newsite.com")`
-4. Tool not found. You think: "Okay, no tool exists. I need to discover the best way to get data. I'll report this." -> Call `report_progress("No tool found. Analyzing website to discover the best data extraction strategy...")`
-5. You think: "Now I'll analyze the site." -> Call `discover_api_or_scraper_strategy("newsite.com")`
-6. And so on for generating, executing, and storing data. Always report before you act.
+2. You think: "Let me first search the fetched code of the website and discover apis there. You Will report this
+3. You think: "First, I need to report that I'm checking for an existing tool for this site." -> Call `report_progress("Checking for an existing tool for newsite.com...")`
+4. You think: "Now I will actually check." -> Call `check_existing_tool("newsite.com")`
+5. Tool not found. You think: "Okay, no tool exists. I need to discover the best way to get data. I'll report this." -> Call `report_progress("No tool found. Analyzing website to discover the best data extraction strategy...")`
+6. You think: "Now I'll analyze the site." -> Call `discover_api_or_scraper_strategy("newsite.com")`
+7. And so on for generating, executing, and storing data. Always report before you act.
 """
 
 # --- Boto3 Clients (initialized once) ---
@@ -60,7 +63,10 @@ class ScoutAgent(Agent):
             self.generate_extraction_tool,
             self.execute_extraction_tool,
             self.store_hackathon_data,
-            self.store_user_preferences
+            self.store_user_preferences,
+            http_request,
+            file_read,
+            file_write
         ]
         
         super().__init__(
@@ -132,6 +138,19 @@ class ScoutAgent(Agent):
             prompt = f"""
             You are an expert reverse-engineer. Analyze the following HTML from {source_url}.
             Your goal is to find a hidden JSON API endpoint. Look for fetch calls, API URLs, or inline JSON.
+            For Example: Devpost has APIs like this: 
+           CP.env.addRoutes({{
+                follows_url: "https://devpost.com/follows",
+                search_softwares_url: "https://devpost.com/software/search",
+                new_software_url: "https://devpost.com/software/new",
+                search_hackathons_url: "https://devpost.com/api/hackathons",
+                notifications_url: "https://devpost.com/notifications",
+                api: {{
+                users_url: "https://api.devpost.com/users"
+                }}
+            }})
+            You can easily find these apis and when you send http_request on these you will find it returns JSON data and this is how you can
+            get hackathon and other relevant data for this.
             If you find a usable API, respond with a JSON object: {{"api_found": true, "endpoint_url": "THE_URL", "method": "GET/POST", "notes": "Describe how to use it"}}
             If you DO NOT find a usable API, respond with: {{"api_found": false, "strategy": "Direct HTML scraping required due to static content."}}
             
@@ -140,7 +159,7 @@ class ScoutAgent(Agent):
             """
             
             response = bedrock_client.converse(
-                modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+                modelId="anthropic.claude-sonnet-4-20250514-v1:0",
                 messages=[{"role": "user", "content": prompt}],
                 inferenceConfig={"maxTokens": 500}
             )
@@ -177,7 +196,7 @@ class ScoutAgent(Agent):
                 """
 
             response = bedrock_client.converse(
-                modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+                modelId="anthropic.claude-sonnet-4-20250514-v1:0",
                 messages=[{"role": "user", "content": prompt}],
                 inferenceConfig={"maxTokens": 2000}
             )
