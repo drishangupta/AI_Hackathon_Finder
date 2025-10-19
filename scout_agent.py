@@ -10,22 +10,45 @@ from requests_aws4auth import AWS4Auth
 
 from strands import Agent, tool
 from strands.agent.conversation_manager import SlidingWindowConversationManager
+# We now use http_request directly from strands_tools
 from strands_tools import http_request, file_read, file_write, use_aws
+from strands.models import BedrockModel
 
-
-# --- Agent System Prompt ---
+# --- Agent System Prompt (Rewritten) ---
 SYSTEM_PROMPT = """You are the Scout Agent, an autonomous AI responsible for discovering hackathons. Your primary mission is to analyze websites, create tools to extract data, and report your progress. You must use the provided tools in a logical sequence.
 
-Your thought process must be streamed back to the user. Before you perform any significant action (like checking for a tool, generating code, or executing a tool), you MUST call the `report_progress` tool to inform the user what you are about to do.
+Your thought process must be streamed back to the user. Before you perform any significant action (like checking a tool, analyzing HTML, or generating code), you MUST call the `report_progress` tool to inform the user what you are about to do.
 
-Example workflow:
-1. User asks to find hackathons on "newsite.com".
-2. You think: "Let me first search the fetched code of the website and discover apis there. You Will report this
-3. You think: "First, I need to report that I'm checking for an existing tool for this site." -> Call `report_progress("Checking for an existing tool for newsite.com...")`
-4. You think: "Now I will actually check." -> Call `check_existing_tool("newsite.com")`
-5. Tool not found. You think: "Okay, no tool exists. I need to discover the best way to get data. I'll report this." -> Call `report_progress("No tool found. Analyzing website to discover the best data extraction strategy...")`
-6. You think: "Now I'll analyze the site." -> Call `discover_api_or_scraper_strategy("newsite.com")`
-7. And so on for generating, executing, and storing data. Always report before you act.
+**AGENT WORKFLOW:**
+
+1.  **Check for Existing Tool:**
+    * Call `report_progress("Checking for existing tool for <source_url>...")`
+    * Call `check_existing_tool(source_url="<source_url>")`.
+
+2.  **If Tool is NOT Found (Analyze and Build):**
+    * Call `report_progress("No tool found. Fetching website content for analysis...")`
+    * Call `http_request(url="<source_url>")` to get the raw HTML/JSON content.
+    * Call `report_progress("Analyzing content to find an API or scraping strategy...")`
+    * **YOU (the agent)** will now *directly analyze* the content from the `http_request`. Your goal is to find a hidden JSON API (like in `<script>` tags or JS variables).
+    * **Based on your analysis, you must formulate a strategy JSON object.**
+        * If API found: `{"api_found": true, "endpoint_url": "THE_URL", "method": "GET", "notes": "Found API endpoint X, seems to return JSON list of hackathons."}`
+        * If no API: `{"api_found": false, "strategy": "Direct HTML scraping required. Hackathons are in <div> tags with class 'hackathon-card'."}`
+    * Call `report_progress("Strategy formulated. Generating Python extraction tool...")`
+
+3.  **Generate Extraction Tool (Code Generation):**
+    * **YOU (the agent)** will now *directly write the Python code* for a function `extract_hackathons(url)`.
+    * This function MUST import `requests` and `BeautifulSoup` (if scraping).
+    * It must return a list of dictionaries, e.g., `[{"title": "...", "deadline": "...", "prize": "..."}]`.
+    * **You must output ONLY the raw Python code for the function, wrapped in ```python ... ```.**
+    * Call `report_progress("Code generated. Saving the new tool to the database...")`
+    * Call `save_extraction_tool(source_url="<source_url>", tool_code="<THE PYTHON CODE YOU JUST WROTE>", strategy_json='<THE STRATEGY JSON YOU FORMULATED>')`.
+
+4.  **Execute and Store:**
+    * Call `report_progress("Executing the tool to extract data...")`
+    * Call `execute_extraction_tool(source_url="<source_url>")`.
+    * Call `report_progress("Storing extracted hackathon data...")`
+    * Call `store_hackathon_data(hackathons_json="<result from execute_extraction_tool>")`.
+    * Call `report_progress("✅ All tasks complete.")`
 """
 
 # --- Boto3 Clients (initialized once) ---
@@ -51,20 +74,22 @@ os_client = OpenSearch(
 )
 
 class ScoutAgent(Agent):
-    def __init__(self, chat_id):
+    def __init__(self, chat_id, model):
         self.chat_id = chat_id
         conversation_manager = SlidingWindowConversationManager(window_size=20)
         
+        # --- Tool List (Rewritten) ---
         tools = [
             self.report_progress,
             self.get_trusted_sources,
             self.check_existing_tool,
-            self.discover_api_or_scraper_strategy,
-            self.generate_extraction_tool,
+            # We now use the http_request tool from strands_tools
+            http_request,
+            # This is our new, "simple" tool that just saves the code
+            self.save_extraction_tool,
             self.execute_extraction_tool,
             self.store_hackathon_data,
             self.store_user_preferences,
-            http_request,
             file_read,
             file_write
         ]
@@ -72,7 +97,10 @@ class ScoutAgent(Agent):
         super().__init__(
             tools=tools,
             system_prompt=SYSTEM_PROMPT,
-            conversation_manager=conversation_manager
+            conversation_manager=conversation_manager,
+            model=model
+            # We will let Strands pick the default model provider
+            # which will be Bedrock based on the boto3 clients
         )
 
     @tool
@@ -125,103 +153,41 @@ class ScoutAgent(Agent):
             print(f"ERROR checking for existing tool: {e}")
             return f"ERROR: Could not check for existing tool: {e}"
 
+    # --- DELETED `discover_api_or_scraper_strategy` ---
+    # The agent will do this logic itself using `http_request` and its own reasoning
+
+    # --- DELETED `generate_extraction_tool` ---
+    # The agent will generate code itself and use the new `save_extraction_tool`
+
+    # --- NEW TOOL ---
     @tool
-    def discover_api_or_scraper_strategy(self, source_url: str) -> str:
-        """Analyzes a website's source to find a hidden API or determine a scraping strategy."""
-        try:
-            import requests
-            html_content = requests.get(source_url, timeout=10).text
-            # Basic sanitization
-            clean_html = re.sub(r'<style.*?</style>', '', html_content, flags=re.DOTALL)
-            clean_html = re.sub(r'<script.*?</script>', '', clean_html, flags=re.DOTALL)
-            
-            prompt = f"""
-            You are an expert reverse-engineer. Analyze the following HTML from {source_url}.
-            Your goal is to find a hidden JSON API endpoint. Look for fetch calls, API URLs, or inline JSON.
-            For Example: Devpost has APIs like this: 
-           CP.env.addRoutes({{
-                follows_url: "https://devpost.com/follows",
-                search_softwares_url: "https://devpost.com/software/search",
-                new_software_url: "https://devpost.com/software/new",
-                search_hackathons_url: "https://devpost.com/api/hackathons",
-                notifications_url: "https://devpost.com/notifications",
-                api: {{
-                users_url: "https://api.devpost.com/users"
-                }}
-            }})
-            You can easily find these apis and when you send http_request on these you will find it returns JSON data and this is how you can
-            get hackathon and other relevant data for this.
-            If you find a usable API, respond with a JSON object: {{"api_found": true, "endpoint_url": "THE_URL", "method": "GET/POST", "notes": "Describe how to use it"}}
-            If you DO NOT find a usable API, respond with: {{"api_found": false, "strategy": "Direct HTML scraping required due to static content."}}
-            
-            HTML Content (first 5000 chars):
-            {clean_html[:5000]}
-            """
-            
-            response = bedrock_client.converse(
-                modelId="anthropic.claude-sonnet-4-20250514-v1:0",
-                messages=[{"role": "user", "content": prompt}],
-                inferenceConfig={"maxTokens": 500}
-            )
-            result = response['output']['message']['content'][0]['text']
-            return result
-        except Exception as e:
-            print(f"ERROR discovering strategy: {e}")
-            return json.dumps({"api_found": False, "strategy": f"Failed to analyze URL, fallback to scraping: {e}"})
-    
-    @tool
-    def generate_extraction_tool(self, source_url: str, strategy_json: str) -> str:
-        """Generates a Python function to extract hackathon data based on the discovered strategy."""
+    def save_extraction_tool(self, source_url: str, tool_code: str, strategy_json: str) -> str:
+        """
+        Saves a newly generated Python tool (as a string) to the Scraper Functions DynamoDB table.
+        The agent must generate the code *first* and then pass it to this tool.
+        """
         try:
             strategy = json.loads(strategy_json)
-            prompt = ""
-            if strategy.get("api_found"):
-                prompt = f"""
-                Act as an expert Python developer. Based on the discovered API for {source_url}: {strategy_json},
-                write a complete Python function `extract_hackathons(url)` that uses the `requests` library to call this endpoint, 
-                parse the JSON response, and return a list of dictionaries. Each dictionary must contain 'title', 'deadline', and 'prize'.
-                Return ONLY the raw Python code.
-                """
-            else:
-                import requests
-                html_content = requests.get(source_url, timeout=10).text
-                prompt = f"""
-                Act as an expert Python developer specializing in web scraping. Since no API was found for {source_url}, 
-                analyze the provided HTML and write a complete Python function `extract_hackathons(url)` using `requests` and `BeautifulSoup` 
-                to extract the hackathon data directly. Each returned dictionary must contain 'title', 'deadline', and 'prize'.
-                Return ONLY the raw Python code.
-
-                HTML Content (first 5000 chars):
-                {html_content[:5000]}
-                """
-
-            response = bedrock_client.converse(
-                modelId="anthropic.claude-sonnet-4-20250514-v1:0",
-                messages=[{"role": "user", "content": prompt}],
-                inferenceConfig={"maxTokens": 2000}
-            )
-            generated_code = response['output']['message']['content'][0]['text']
             
-            # Clean up the response to get only the code
-            if "```python" in generated_code:
-                generated_code = generated_code.split("```python")[1].split("```")[0]
-
-            # Store the generated function in DynamoDB
+            # Clean up the code to remove markdown fences if the agent added them
+            if "```python" in tool_code:
+                tool_code = tool_code.split("```python")[1].split("```")[0].strip()
+            
             table_name = os.environ['SCRAPER_FUNCTIONS_TABLE']
             dynamodb_client.put_item(
                 TableName=table_name,
                 Item={
                     'source_url': {'S': source_url},
-                    'scraper_code': {'S': generated_code},
+                    'scraper_code': {'S': tool_code},
                     'function_type': {'S': 'api' if strategy.get("api_found") else 'scraper'},
                     'last_updated_timestamp': {'N': str(int(time.time()))}
                 }
             )
             return f"SUCCESS: Generated and saved tool for {source_url}."
         except Exception as e:
-            print(f"ERROR generating tool: {e}")
-            return f"ERROR: Failed to generate tool: {e}"
-
+            print(f"ERROR saving tool: {e}")
+            return f"ERROR: Failed to save tool: {e}"
+    
     @tool
     def execute_extraction_tool(self, source_url: str) -> str:
         """Executes a generated tool to extract hackathon data."""
@@ -236,12 +202,16 @@ class ScoutAgent(Agent):
             
             scraper_code = response['Item']['scraper_code']['S']
             
+            # Import necessary libraries for the exec scope
+            exec_globals = {
+                "requests": __import__("requests"),
+                "BeautifulSoup": __import__("bs4", fromlist=["BeautifulSoup"]).BeautifulSoup
+            }
             local_scope = {}
-            exec(scraper_code, globals(), local_scope)
+            exec(scraper_code, exec_globals, local_scope)
             
             hackathons = local_scope['extract_hackathons'](source_url)
             
-            # Robustly check if the output is a list of dicts
             if isinstance(hackathons, list) and all(isinstance(i, dict) for i in hackathons):
                 return json.dumps(hackathons)
             else:
@@ -256,7 +226,6 @@ class ScoutAgent(Agent):
         """Stores a list of hackathon data into the Hackathons DynamoDB table."""
         try:
             hackathons = json.loads(hackathons_json)
-            # Handle potential nested structure like {"hackathons": [...]}
             if isinstance(hackathons, dict) and 'hackathons' in hackathons:
                 hackathons = hackathons['hackathons']
 
@@ -290,14 +259,12 @@ class ScoutAgent(Agent):
     def store_user_preferences(self, user_id: str, preference_text: str) -> str:
         """Converts user preferences to an embedding and stores it in OpenSearch."""
         try:
-            # 1. Generate embedding using Bedrock
             response = bedrock_client.invoke_model(
                 modelId="amazon.titan-embed-text-v1",
                 body=json.dumps({"inputText": preference_text})
             )
             embedding = json.loads(response['body'].read())['embedding']
 
-            # 2. Store in OpenSearch
             document = {
                 'user_id': user_id,
                 'preference_text': preference_text,
@@ -307,7 +274,7 @@ class ScoutAgent(Agent):
             os_client.index(
                 index='user_preferences',
                 body=document,
-                id=user_id, # Use user_id as document ID to allow updates
+                id=user_id,
                 refresh=True
             )
             return f"SUCCESS: Preferences for user {user_id} have been stored."
@@ -316,18 +283,30 @@ class ScoutAgent(Agent):
             return f"ERROR: Failed to store preferences: {e}"
 
 
-# --- Main Execution Logic ---
+# --- Main Execution Logic (Unchanged) ---
+# This part is correct. It's the entry point for the ECS container.
 if __name__ == "__main__":
     if 'USER_MESSAGE' in os.environ:
         # ECS Container Mode
         try:
             user_message = os.environ['USER_MESSAGE']
             chat_id = os.environ['CHAT_ID']
-            user_id = hashlib.md5(chat_id.encode()).hexdigest() # Create a stable user_id from chat_id
+            user_id = hashlib.md5(chat_id.encode()).hexdigest()
             
             print(f"INFO: Initializing Scout Agent for chat_id: {chat_id}")
-            agent = ScoutAgent(chat_id=chat_id)
-            
+            # We must configure the agent to use Bedrock
+            # This is automatically handled by Strands if boto3 is configured
+            # but we'll explicitly set the model for clarity.
+            session = boto3.Session(region_name=os.environ.get("AWS_REGION", "ap-south-1"))
+
+            # Create the Bedrock model instance
+            bedrock_model = BedrockModel(
+                model_id="apac.anthropic.claude-sonnet-4-20250514-v1:0",
+                boto_session=session
+            )
+
+            # Pass the model object during initialization
+            agent = ScoutAgent(chat_id=chat_id, model=bedrock_model)
             final_response = agent(user_message)
             
             agent.report_progress(f"✅ Task Complete. Final summary: {final_response}")
@@ -335,7 +314,6 @@ if __name__ == "__main__":
             
         except Exception as e:
             print(f"FATAL_ERROR: {e}")
-            # Try to report the final error back to the user
             if 'chat_id' in locals():
                 try:
                     ScoutAgent(chat_id=chat_id).report_progress(f"❌ A fatal error occurred: {e}")
@@ -348,6 +326,7 @@ if __name__ == "__main__":
         print("--- Scout Agent Interactive Mode ---")
         chat_id = "local_user"
         agent = ScoutAgent(chat_id=chat_id)
+        # agent.set_model("anthropic.claude-sonnet-4-20250514-v1:0")
         while True:
             try:
                 user_input = input(">> ")
@@ -358,4 +337,3 @@ if __name__ == "__main__":
             except KeyboardInterrupt:
                 print("\nExiting.")
                 break
-
