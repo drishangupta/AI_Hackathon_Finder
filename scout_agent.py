@@ -105,7 +105,6 @@ os_client = OpenSearch(
     verify_certs=True,
     connection_class=RequestsHttpConnection
 )
-
 class ScoutAgent(Agent):
     def __init__(self, chat_id, model,user_id):
         self.chat_id = chat_id
@@ -127,7 +126,7 @@ class ScoutAgent(Agent):
             self.save_api_endpoint,
             file_read,
             file_write,
-            mem0_memory
+            self.mem0_json_memory
         ]
         
         super().__init__(
@@ -139,6 +138,31 @@ class ScoutAgent(Agent):
             # which will be Bedrock based on the boto3 clients
         )
 
+    @tool
+    def mem0_json_memory(action: str, query: str = "") -> str:
+        """
+        Wrapper around mem0_memory that forces JSON-only output.
+        Ensures Titan or Claude outputs are parseable by mem0.
+        """
+        # Step 1: inject a runtime JSON enforcement prompt
+        os.environ["MEM0_FORCE_JSON"] = "true"
+        os.environ["MEM0_SYSTEM_PROMPT"] = (
+            "You are a structured reasoning agent. Always return ONLY valid JSON. "
+            "No explanations, no extra text. Schema: "
+            '{"new_facts": [{"fact": "string", "source": "string"}]}'
+        )
+
+        # Step 2: call the original mem0 memory tool
+        result = mem0_memory(action=action, query=query)
+
+        # Step 3: sanitize output if model adds stray text before/after JSON
+        if not result.strip().startswith("{"):
+            result = re.sub(r'^[^{]*', '', result)
+        if not result.strip().endswith("}"):
+            result = re.sub(r'[^}]*$', '', result)
+
+        return result
+    
     @tool
     def report_progress(self, message: str) -> str:
         """Reports the agent's current status or next action to the user."""

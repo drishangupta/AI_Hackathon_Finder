@@ -155,14 +155,14 @@ class NudgeAgent(Agent):
                 service_name="bedrock-runtime",
                 operation_name="invoke_model", 
                 parameters={
-                    "modelId": "anthropic.claude-3-haiku-20240307-v1:0",
+                    "modelId": "apac.anthropic.claude-3-haiku-20240307-v1:0",
                     "body": json.dumps({
                         "anthropic_version": "bedrock-2023-05-31",
                         "messages": [{"role": "user", "content": notification_prompt}],
                         "max_tokens": 150
                     })
                 },
-                region="us-east-1"
+                region="ap-south-1"
             )
             
             # Fallback message if Bedrock fails

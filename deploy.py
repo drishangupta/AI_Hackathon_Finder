@@ -50,8 +50,6 @@ def deploy_infrastructure(parameters):
 
     cfn_params = [
         {'ParameterKey': 'KnowledgeBaseId', 'ParameterValue': parameters['kb_id']},
-        {'ParameterKey': 'OpenSearchCollectionArn', 'ParameterValue': parameters['os_arn']},
-        {'ParameterKey': 'OpenSearchCollectionEndpoint', 'ParameterValue': parameters['os_endpoint']}
     ]
 
     try:
@@ -173,7 +171,7 @@ def main():
     """Main deployment orchestration flow."""
     load_dotenv()
     
-    required_vars = ['KNOWLEDGE_BASE_ID', 'OPENSEARCH_COLLECTION_ARN', 'OPENSEARCH_COLLECTION_ENDPOINT']
+    required_vars = ['KNOWLEDGE_BASE_ID']
     if not all(os.environ.get(var) for var in required_vars):
         logging.error("❌ Missing required environment variables in your .env file.")
         logging.error(f"Please ensure {', '.join(required_vars)} are set.")
@@ -181,8 +179,6 @@ def main():
 
     parameters = {
         "kb_id": os.environ['KNOWLEDGE_BASE_ID'],
-        "os_arn": os.environ['OPENSEARCH_COLLECTION_ARN'],
-        "os_endpoint": os.environ['OPENSEARCH_COLLECTION_ENDPOINT']
     }
     
     logging.info("🚀 Starting Hackathon Hunter Deployment 🚀")
