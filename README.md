@@ -1,4 +1,4 @@
-# 🎯 Hackathon Hunter
+# 🎯 FindAthon Prime
 **Deployed Multi-Agent AI System for Autonomous Hackathon Discovery**
 
 *AWS Agentic AI Hackathon - Live Production System*
@@ -7,7 +7,7 @@
 
 ## 🚀 The Innovation: Autonomous Tool Generation
 
-**Hackathon Hunter** doesn't just scrape websites—it **reverse-engineers them in real-time** to create custom discovery tools. This is the first deployed AI system that autonomously adapts to any hackathon platform without manual configuration.
+**FindAthon Prime** doesn't just scrape websites—it **reverse-engineers them in real-time** to create custom discovery tools. This is the first deployed AI system that autonomously adapts to any hackathon platform without manual configuration.
 
 ### 🌐 Live Demo Available
 - **Interactive Website**: Full project showcase with live demonstrations
