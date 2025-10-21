@@ -56,7 +56,8 @@ class NudgeHelper:
                         "hackathon_id": item.get('hackathon_id', {}).get('S', 'N/A'),
                         "title": item.get('hackathon_title', {}).get('S', 'N/A'),
                         "note": item.get('user_note', {}).get('S', None),
-                        "tracked_timestamp": int(item.get('tracked_timestamp', {}).get('N', '0'))
+                        "tracked_timestamp": int(item.get('tracked_timestamp', {}).get('N', '0')),
+                        "deadline" : item.get('deadline',{}).get('S', None)
                     }
                     tracked_hackathons_list.append(hackathon_info)
                 logger.info(f"Found {len(tracked_hackathons_list)} tracked hackathons for user {user_id}")
@@ -276,6 +277,7 @@ def lambda_handler(event, context):
     for user_id in users_to_process:
         logger.info(f"Processing user: {user_id}")
         chat_id_for_user = None
+        deadline_reminders_to_send = []
         try:
             # --- a. Get Interests & Tracked Hackathons ---
             interests_json = nudge_helper.get_user_interests(user_id=user_id) # Use helper instance
@@ -290,7 +292,41 @@ def lambda_handler(event, context):
                 results.append({"user_id": user_id, "status": "skipped", "reason": "No tracked items"}); continue
             if not chat_id_for_user:
                 results.append({"user_id": user_id, "status": "skipped", "reason": "Missing chat_id"}); continue
+            if tracked_hackathons: # Only check deadlines if user is tracking items
+                logger.info(f"Checking deadlines for {len(tracked_hackathons)} tracked hackathons for user {user_id}")
+                today = datetime.now(timezone.utc).date()
+                three_days_from_now = today + timedelta(days=3)
+                reminders_sent_recently_this_run = set() # Track per-run
 
+                for hackathon in tracked_hackathons:
+                    deadline_str = hackathon.get("deadline")
+                    hackathon_id = hackathon.get("hackathon_id")
+                    hackathon_title = hackathon.get("title", "A tracked hackathon")
+                    user_note = hackathon.get("note")
+
+                    if deadline_str and hackathon_id:
+                        try:
+                            # Attempt to parse deadline (adjust format if needed, e.g., '%Y-%m-%dT%H:%M:%SZ')
+                            # Assuming YYYY-MM-DD format for simplicity
+                            deadline_date = datetime.strptime(deadline_str, '%Y-%m-%d').date()
+
+                            # Check if deadline is today, tomorrow, or day after
+                            if today <= deadline_date <= three_days_from_now:
+                                logger.info(f"Deadline approaching for {hackathon_title} ({deadline_str}) for user {user_id}")
+
+                                # Basic check to avoid duplicates within this specific run
+                                # TODO: Add check against NotificationHistoryTable for deadline reminders if needed
+                                if hackathon_id not in reminders_sent_recently_this_run:
+                                    reminder_msg = f"🔔 Reminder: The deadline for '{hackathon_title}' is approaching on {deadline_str}!"
+                                    if user_note: # Append user's note if it exists
+                                        reminder_msg += f"\nYour note: {user_note}"
+                                    deadline_reminders_to_send.append(reminder_msg)
+                                    reminders_sent_recently_this_run.add(hackathon_id)
+                                    # TODO: Optionally update history specifically for this reminder type/hackathon_id
+
+                        except ValueError:
+                            # Log if deadline format is unexpected
+                            logger.warning(f"Could not parse deadline '{deadline_str}' (expected YYYY-MM-DD) for hackathon {hackathon_id}")
             # --- b. Find Matching Hackathons ---
             matches_json = nudge_helper.find_matching_hackathons(tracked_hackathons_json=json.dumps(tracked_hackathons)) # Use helper instance
             matches_data = json.loads(matches_json)

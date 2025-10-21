@@ -238,11 +238,11 @@ class ScoutAgent(Agent):
             return "Failed to report progress."
 
     @tool
-    def track_hackathon(self, hackathon_id: str, hackathon_title: str, note: str = None) -> str:
+    def track_hackathon(self, hackathon_id: str, hackathon_title: str, deadline: str = "N/A",note: str = None) -> str:
         """
         Stores that the user is interested in a specific hackathon, including chat_id and an optional note.
         Uses user_id and hackathon_id as the primary key.
-        Provide the hackathon_id and title. A brief note can optionally be added.
+        Provide the hackathon_id, title AND deadline (YYYY-MM-DD). A brief note can optionally be added.
         """
         logger.info(f"--- TRACKING HACKATHON --- User: {self.user_id}, ChatID: {self.chat_id}, Hackathon ID: {hackathon_id}, Note: {note}")
         table_name = os.environ.get('USER_INTERESTS_TABLE')
@@ -256,6 +256,7 @@ class ScoutAgent(Agent):
                 'hackathon_id': {'S': hackathon_id}, # RANGE Key
                 'hackathon_title': {'S': hackathon_title},
                 'chat_id': {'S': self.chat_id}, # Store chat_id
+                'deadline': {'S': deadline},
                 'tracked_timestamp': {'N': str(int(time.time()))}
             }
             # Add the note only if provided by the user
