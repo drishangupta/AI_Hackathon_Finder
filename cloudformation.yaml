@@ -576,11 +576,11 @@ Resources:
       EventSourceArn: !GetAtt ScoutResponseQueue.Arn
       FunctionName: !GetAtt TelegramHandlerFunction.Arn
 
-  WeeklyNotificationRule:
+  WeeklyNotificationRule: 
     Type: AWS::Events::Rule
     Properties:
-      Name: weekly-hackathon-notifications
-      ScheduleExpression: 'cron(0 20 ? * SUN *)'
+      Name: periodic-hackathon-notifications # Renamed for clarity
+      ScheduleExpression: 'rate(4 days)'   # Changed from cron to rate
       State: ENABLED
       Targets:
         - Arn: !GetAtt NudgeLambdaFunction.Arn
