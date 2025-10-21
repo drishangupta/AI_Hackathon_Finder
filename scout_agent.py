@@ -153,7 +153,63 @@ class ScoutAgent(Agent):
             # We will let Strands pick the default model provider
             # which will be Bedrock based on the boto3 clients
         )
+        self.load_history()
+    
+    
+    def load_history(self):
+        """Loads the conversation history from DynamoDB."""
+        table_name = os.environ.get('CHAT_HISTORY_TABLE')
+        if not table_name:
+            logger.warning("CHAT_HISTORY_TABLE env var not set. Starting with no history.")
+            return
 
+        try:
+            response = dynamodb_client.get_item(
+                TableName=table_name,
+                Key={'chat_id': {'S': self.chat_id}}
+            )
+            
+            if 'Item' in response:
+                # Load the messages list and assign it to the agent's memory
+                messages_str = response['Item']['messages']['S']
+                self.messages = json.loads(messages_str) # This is the key line
+                logger.info(f"Loaded {len(self.messages)} messages from history for {self.chat_id}")
+            else:
+                logger.info(f"No chat history found for {self.chat_id}. Starting fresh.")
+        
+        except Exception as e:
+            # Handle case where table or item doesn't exist yet
+            if 'ResourceNotFoundException' in str(e):
+                logger.warning(f"ChatHistory table not found. Starting with no history.")
+            else:
+                logger.error(f"Error loading history: {e}")
+
+    def save_history(self):
+        """Saves the current conversation history to DynamoDB."""
+        table_name = os.environ.get('CHAT_HISTORY_TABLE')
+        if not table_name:
+            logger.warning("CHAT_HISTORY_TABLE env var not set. Cannot save history.")
+            return
+
+        try:
+            # self.messages is the list of all messages managed by Strands.
+            # We save the entire list (including the latest user/agent turn)
+            # back to DynamoDB.
+            messages_str = json.dumps(self.messages)
+            
+            dynamodb_client.put_item(
+                TableName=table_name,
+                Item={
+                    'chat_id': {'S': self.chat_id},
+                    'messages': {'S': messages_str},
+                    'last_updated': {'N': str(int(time.time()))}
+                }
+            )
+            logger.info(f"Saved {len(self.messages)} messages to history for {self.chat_id}")
+        
+        except Exception as e:
+            logger.error(f"Error saving history: {e}")
+    
     
     @tool
     def report_progress(self, message: str) -> str:
@@ -469,6 +525,7 @@ if __name__ == "__main__":
             agent = ScoutAgent(chat_id=chat_id, model=bedrock_model,user_id=user_id)
             final_response = agent(user_message)
             
+            agent.save_history()            
             agent.report_progress(f"✅ Task Complete. Final summary: {final_response}")
             logger.info("INFO: Task completed successfully.")
             

@@ -174,6 +174,18 @@ Resources:
         Enabled: true
     DeletionPolicy: Delete
 
+  ChatHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ChatHistory
+      AttributeDefinitions:
+        - AttributeName: "chat_id"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "chat_id"
+          KeyType: "HASH"
+      BillingMode: PAY_PER_REQUEST
+
   KnowledgeBaseBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -315,12 +327,14 @@ Resources:
                   - !GetAtt HackathonsTable.Arn
                   - !GetAtt ScraperFunctionsTable.Arn
                   - !GetAtt UserInterestsTable.Arn
+                  - !GetAtt ChatHistoryTable.Arn
               - Effect: Allow
                 Action: aoss:APIAccessAll
                 Resource: !GetAtt OpenSearchCollection.Arn
               - Effect: Allow
                 Action: 'sqs:SendMessage'
                 Resource: !GetAtt ScoutResponseQueue.Arn
+        
 
   NudgeAgentRole:
     Type: AWS::IAM::Role
@@ -452,6 +466,8 @@ Resources:
               Value: aws_bedrock
             - Name: MEM0_EMBEDDER_MODEL
               Value: amazon.titan-embed-text-v2:0
+            - Name: "CHAT_HISTORY_TABLE"
+              Value: !Ref ChatHistoryTable
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -621,3 +637,14 @@ Outputs:
     Description: The URL of the SQS queue for Scout agent responses
     Value: !Ref ScoutResponseQueue
 
+  ChatHistoryTableName:
+    Description: "The name of the DynamoDB table for chat history"
+    Value: !Ref ChatHistoryTable
+    Export:
+      Name: !Sub "${AWS::StackName}-ChatHistoryTableName"
+
+  ChatHistoryTableArn:
+    Description: "The ARN of the DynamoDB table for chat history"
+    Value: !GetAtt ChatHistoryTable.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ChatHistoryTableArn"
