@@ -240,11 +240,11 @@ class ScoutAgent(Agent):
     @tool
     def track_hackathon(self, hackathon_id: str, hackathon_title: str, note: str = None) -> str:
         """
-        Stores that the user is interested in a specific hackathon, optionally adding a note.
-        Use this when the user explicitly expresses interest in tracking a hackathon.
+        Stores that the user is interested in a specific hackathon, including chat_id and an optional note.
+        Uses user_id and hackathon_id as the primary key.
         Provide the hackathon_id and title. A brief note can optionally be added.
         """
-        logger.info(f"--- TRACKING HACKATHON --- User: {self.user_id}, Hackathon ID: {hackathon_id}, Note: {note}")
+        logger.info(f"--- TRACKING HACKATHON --- User: {self.user_id}, ChatID: {self.chat_id}, Hackathon ID: {hackathon_id}, Note: {note}")
         table_name = os.environ.get('USER_INTERESTS_TABLE')
         if not table_name:
             logger.error("USER_INTERESTS_TABLE env var not set. Cannot track hackathon.")
@@ -252,15 +252,17 @@ class ScoutAgent(Agent):
 
         try:
             item_to_put = {
-                'user_id': {'S': self.user_id},
-                'hackathon_id': {'S': hackathon_id},
-                'hackathon_title': {'S': hackathon_title}, # Store title for easier retrieval
-                'tracked_timestamp': {'N': str(int(time.time()))} # Store when it was tracked
+                'user_id': {'S': self.user_id}, # HASH Key
+                'hackathon_id': {'S': hackathon_id}, # RANGE Key
+                'hackathon_title': {'S': hackathon_title},
+                'chat_id': {'S': self.chat_id}, # Store chat_id
+                'tracked_timestamp': {'N': str(int(time.time()))}
             }
-            # Add the note only if provided
+            # Add the note only if provided by the user
             if note:
                 item_to_put['user_note'] = {'S': note}
 
+            # Use PutItem for HASH+RANGE key schema when creating/overwriting an item
             dynamodb_client.put_item(
                 TableName=table_name,
                 Item=item_to_put
