@@ -31,13 +31,16 @@ Hackathon Hunter is a fully deployed multi-agent AI system that revolutionizes h
 - **Nudge Agent** (Claude Haiku + Lambda): Manages intelligent notifications
 - **Knowledge Base** (Bedrock KB + OpenSearch): Provides trusted source grounding
 
-**Tech Stack**:
-- **AWS Bedrock**: Claude 3 models for natural language processing
-- **ECS Fargate**: Containerized Scout Agent for resource-intensive tasks
-- **Lambda**: Lightweight Nudge Agent and Telegram webhook handling
-- **DynamoDB**: Hackathon data and generated scraper storage
-- **OpenSearch Serverless**: User preferences and vector similarity matching
-- **Strands Framework**: Conversational AI agents with 40+ pre-built tools
+**Deployed Infrastructure**:
+- **35+ AWS Resources**: Complete CloudFormation stack with complex dependencies
+- **Custom VPC**: Multi-AZ networking with security groups and route tables
+- **6 DynamoDB Tables**: Hackathons, scrapers, users, chat history, notifications, deduplication
+- **ECS Fargate**: Containerized Scout Agent with auto-scaling (0-N instances)
+- **3 Lambda Functions**: Telegram handler, Nudge agent, with shared dependency layer
+- **OpenSearch Serverless**: Vector search with encryption and access policies
+- **API Gateway + SQS**: Real-time webhook processing and async communication
+- **IAM Security**: 3 specialized roles with least-privilege permissions
+- **Monitoring**: CloudWatch logs, ECS metrics, Lambda insights
 
 **Key Innovation**: The deployed autonomous tool generation workflow that reverse-engineers any website and creates custom extraction tools without human intervention - now live and operational.
 

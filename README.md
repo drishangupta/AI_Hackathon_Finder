@@ -48,39 +48,76 @@ Scout: 📊 Found 12 hackathons, saved reusable tool for future use
 
 ## 🏗️ Enterprise-Grade Architecture
 
-### AWS Services Stack
+### Complete AWS Infrastructure (35+ Resources)
+
+Our CloudFormation template deploys a sophisticated multi-tier architecture:
+
+#### **🌐 Networking & Security Layer**
+- **Custom VPC** (10.0.0.0/16) with Internet Gateway
+- **Multi-AZ Public Subnets** for high availability
+- **Security Groups** with controlled egress for web scraping
+- **Route Tables** and subnet associations
+
+#### **🧠 AI & Machine Learning Stack**
+- **Amazon Bedrock**: Claude 3 Sonnet (Scout) + Haiku (Nudge)
+- **Bedrock Knowledge Base**: Trusted source grounding
+- **Titan Embeddings**: Vector similarity matching
+- **OpenSearch Serverless**: Vector search with security policies
+
+#### **💾 Data Storage (6 DynamoDB Tables)**
 ```yaml
-Compute:
-  - ECS Fargate: Scout agent container orchestration
-  - AWS Lambda: Nudge agent + Telegram webhook handler
-  - ECR: Docker image registry
-
-AI/ML:
-  - Amazon Bedrock: Claude 3 Sonnet/Haiku models
-  - Bedrock Knowledge Base: Trusted source grounding
-  - Titan Embeddings: Vector similarity matching
-
-Storage & Data:
-  - DynamoDB: Hackathon data + scraper functions
-  - OpenSearch Serverless: User preferences + memories
-  - S3: Knowledge base documents + artifacts
-
-Integration:
-  - API Gateway: Telegram webhook endpoint
-  - SQS: Asynchronous agent communication
-  - EventBridge: Scheduled notification triggers
+HackathonsTable: hackathon_id (PK) → discovered hackathon data
+ScraperFunctionsTable: source_url (PK) → generated Python scrapers
+UserInterestsTable: user_id (PK), hackathon_id (SK) → preferences
+ProcessedMessagesTable: message_id (PK) → deduplication (TTL)
+ChatHistoryTable: chat_id (PK) → conversation persistence
+NotificationHistoryTable: user_id (PK) → notification tracking
 ```
 
-### Database Schema
-```sql
--- DynamoDB Tables
-Hackathons: hackathon_id (PK) → title, deadline, prize, source_url, data
-ScraperFunctions: source_url (PK) → scraper_code, function_type, last_updated  
-UserInterests: user_id (PK), hackathon_id (SK) → interest_level, timestamp
+#### **🚀 Compute & Containers**
+- **ECS Fargate Cluster**: Serverless container orchestration
+- **ECR Repository**: Docker registry with vulnerability scanning
+- **Scout Task Definition**: 1024 CPU, 2048 MB memory
+- **Auto-scaling ECS Service**: Scales from 0 to handle demand
 
--- OpenSearch Collection
-user-preferences: user_id, preference_text, preference_vector (1536-dim)
+#### **⚡ Serverless Functions**
+- **Telegram Handler Lambda**: Webhook processing + ECS triggering
+- **Nudge Agent Lambda**: Scheduled notifications (every 4 days)
+- **Lambda Layer**: Shared Python dependencies
+- **SQS Event Source Mapping**: Automatic triggers
+
+#### **🔗 API & Integration**
+- **API Gateway**: REST API with /webhook endpoint
+- **SQS Queue**: Asynchronous Scout → Telegram communication
+- **EventBridge Rule**: Scheduled executions
+- **S3 Bucket**: Knowledge Base documents + artifacts
+
+#### **🔐 IAM Security (3 Specialized Roles)**
+```yaml
+ScoutAgentRole:
+  - Full Bedrock access (Claude + Knowledge Base)
+  - DynamoDB operations (6 tables)
+  - OpenSearch vector operations
+  - SQS message sending
+
+NudgeAgentRole:
+  - Bedrock Haiku model access
+  - DynamoDB read access
+  - SQS notifications
+
+TelegramHandlerRole:
+  - ECS task execution
+  - Role passing permissions
+  - SQS queue management
 ```
+
+### **📊 Infrastructure Complexity**
+- **Resource Count**: 35+ AWS resources in single template
+- **Dependencies**: Complex interdependencies with proper ordering
+- **Security**: OpenSearch encryption, network, and data policies
+- **Auto-scaling**: ECS Fargate + Lambda scale to zero
+- **Monitoring**: CloudWatch logs with retention policies
+- **Cost Optimization**: Pay-per-request + serverless architecture
 
 ---
 
