@@ -11,15 +11,20 @@ import logging
 from strands import Agent, tool
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 # We now use http_request directly from strands_tools
-from strands_tools import http_request, file_read, file_write, use_aws
+from strands_tools import http_request, file_read, file_write, use_aws,shell
 from strands.models import BedrockModel
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
+os.environ["BYPASS_TOOL_CONSENT"] = "true"
 # --- Agent System Prompt (Rewritten) ---
 SYSTEM_PROMPT = """You are the Scout Agent, an autonomous AI with a persistent memory. You MUST follow this workflow for EVERY user message without deviation.
 
+**Global Tool Error Handling Rule (Mandatory)**
+You are equipped with a `shell` tool. If ANY tool call fails with a `ModuleNotFoundError: No module named 'X'`, you MUST NOT stop or apologize. Your next action MUST be to call the `shell` tool to run `pip install X`. After the installation is successful, 
+you MUST immediately retry the original tool call that failed, and then continue the workflow.
+**Global Rule**
+    You should call report_user tool to keep the user in loop of whatever you are doing, you MUST tell the user what you are doing every 10 seconds. User MUST NOT wait more than 30 seconds, if he must,you should tell him that the current task might take a bit
 **Step 1: Classify the User's Intent (Mandatory First Step)**
 Your first thought MUST be to classify the user's message into one of three categories and state your choice. Your thought should be: 'The user's intent is [intent]. I will now proceed to Path [A/B/C].'
 - `preference_update`: The user is asking you to remember something (e.g., "remember I like AI", "my interests are...").
@@ -66,7 +71,10 @@ This workflow is called by Path B or C for each URL.
     * If `api_found` is true, call `save_api_endpoint(...)` then go to `Execute API`.
     * If `api_found` is false, **YOU** will generate the Python scraper code, then call `save_extraction_tool(...)`, then go to `Execute Scraper`.
 4.  **Execute API:** Call `http_request(url="<the_endpoint_url>")`. Proceed to `Store Data`.
-5.  **Execute Scraper:** Call `execute_extraction_tool(source_url="<the_current_url>")`. Proceed to `Store Data`.
+5.  **Execute Scraper:**
+    a. Call `execute_extraction_tool(source_url="<the_current_url>")`.
+    b. **CRITICAL ERROR HANDLING:** If this call fails with a `ModuleNotFoundError: No module named 'X'`, you MUST follow the Global Error Handling Rule: immediately call the `shell` tool to run `pip install <module_name>`.
+    c. After the shell tool succeeds, you MUST retry the `execute_extraction_tool` call from step 5a.
 6.  **Store Data:** Call `store_hackathon_data(...)` with the results.
 7.  **Loop or Finish:** If in a loop (Path B), move to the next URL. If all tasks are done, call `report_progress("✅ All tasks complete.")`.
 """
@@ -113,7 +121,8 @@ class ScoutAgent(Agent):
             self.save_api_endpoint,
             file_read,
             file_write,
-            self.get_user_preferences
+            self.get_user_preferences,
+            shell
         ]
         
         super().__init__(
@@ -284,7 +293,9 @@ class ScoutAgent(Agent):
             # Import necessary libraries for the exec scope
             exec_globals = {
                 "requests": __import__("requests"),
-                "BeautifulSoup": __import__("bs4", fromlist=["BeautifulSoup"]).BeautifulSoup
+                "BeautifulSoup": __import__("bs4", fromlist=["BeautifulSoup"]).BeautifulSoup,
+                "selenium": __import__("selenium", fromlist=["webdriver"]).webdriver.ChromeOptions(),
+                "json": __import__("json")
             }
             local_scope = {}
             exec(scraper_code, exec_globals, local_scope)

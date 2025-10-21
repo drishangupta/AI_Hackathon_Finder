@@ -19,7 +19,7 @@ COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/pytho
 
 # Copy application code
 COPY scout_agent.py .
-
+ENV BYPASS_TOOL_CONSENT="true"
 # The agent is triggered by environment variables when run as a Fargate task
 # The CMD is a fallback for local testing or direct invocation
 CMD ["python", "scout_agent.py"]
