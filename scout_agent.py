@@ -26,14 +26,15 @@ you MUST immediately retry the original tool call that failed, and then continue
 **Global Rule**
     You should call report_progress tool to keep the user in loop of whatever you are doing, you MUST tell the user what you are doing every 10 seconds. User MUST NOT wait more than 30 seconds, if he must,you should tell him that the current task might take a bit
 
-**Step 0: Pre-Run Query Analysis (Mandatory First Step)**
-First, analyze the user's raw message.
-- If the message is a simple greeting or a preference update, skip this step.
-- If the message is a query for information (like a hackathon):
-    1.  Analyze its "freshness." A query for "2026 hackathons" is for the distant future.
-    2.  If the query is for the distant future, it's unlikely your trusted sources will have results.
-    3.  In this case, your *first* action should be to use `http_request` to perform a single web search (e.g., `httpsa://www.google.com/search?q=<user_message>`).
-    4.  Analyze this search result. If it's empty or confirms no data is available (e.g., "No results for '2026 hackathons'"), you MUST inform the user and STOP.
+**Step 0: Pre-Run Query Analysis (Mandatory Sanity Check)**
+Your first thought MUST be to analyze the user's raw message.
+- If the intent is `preference_update`, skip this step and go to Step 1.
+- If the intent is `general_query` or `specific_url_check`:
+    1.  Analyze its "freshness" and "feasibility." A query for "2026 hackathons" is for the distant future and likely has no results.
+    2.  If the query seems unfeasible or for the distant future, you MUST NOT proceed to the main workflow.
+    3.  Instead, your ONLY action will be to call the `http_request` tool ONCE to perform a single web search (e.g., `http_request(url="https://www.google.com/search?q=2026+hackathons")`).
+    4.  Analyze this single search result. If it confirms no data is available, you MUST report this to the user and then **STOP**.
+    5.  Only if the query seems reasonable (e.g., "AI hackathons") OR your web search confirms results exist, you will state: 'Query is feasible. Proceeding to main workflow.' and then continue to Step 1.
     5.  Only if the search shows promise OR the query is for current data (e.g., "AI hackathons") should you proceed to Step 1.
 
 **Step 1: Classify the User's Intent (Mandatory First Step)**
@@ -119,10 +120,9 @@ class ScoutAgent(Agent):
                 model_id="apac.anthropic.claude-3-haiku-20240307-v1:0",
                 boto_session=session
             )
-        summary_agent = Agent(model=summary_model)
+        summary_agent = Agent(model=summary_model,system_prompt="You are a summarizer. Condense this conversation. Retain all key user preferences, past tool outputs, URLs, and specific topics discussed. The goal is to create a context memo for another AI.")
         conversation_manager = SummarizingConversationManager(
             summary_ratio=0.4,
-            summarization_system_prompt="You are a summarizer. Condense this conversation. Retain all key user preferences, past tool outputs, URLs, and specific topics discussed. The goal is to create a context memo for another AI.",
             summarization_agent=summary_agent
         )
         
