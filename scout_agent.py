@@ -9,7 +9,7 @@ from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_aws4auth import AWS4Auth
 import logging
 from strands import Agent, tool
-from strands.agent.conversation_manager import SlidingWindowConversationManager
+from strands.agent.conversation_manager import SummarizingConversationManager
 # We now use http_request directly from strands_tools
 from strands_tools import http_request, file_read, file_write, use_aws,shell
 from strands.models import BedrockModel
@@ -115,7 +115,16 @@ class ScoutAgent(Agent):
     def __init__(self, chat_id, model,user_id):
         self.chat_id = chat_id
         self.user_id = user_id
-        conversation_manager = SlidingWindowConversationManager(window_size=20)
+        summary_model = BedrockModel(
+                model_id="apac.anthropic.claude-3-haiku-20240307-v1:0",
+                boto_session=session
+            )
+        summary_agent = Agent(model=summary_model)
+        conversation_manager = SummarizingConversationManager(
+            summary_ratio=0.4,
+            summarization_system_prompt="You are a summarizer. Condense this conversation. Retain all key user preferences, past tool outputs, URLs, and specific topics discussed. The goal is to create a context memo for another AI.",
+            summarization_agent=summary_agent
+        )
         
         # --- Tool List (Rewritten) ---
         tools = [
