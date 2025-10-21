@@ -186,6 +186,19 @@ Resources:
           KeyType: "HASH"
       BillingMode: PAY_PER_REQUEST
 
+  NotificationHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AWS::StackName}-NotificationHistory' # Or just 'NotificationHistory' if you prefer
+      AttributeDefinitions:
+        - AttributeName: "user_id"  # The primary key
+          AttributeType: "S"      # S = String
+      KeySchema:
+        - AttributeName: "user_id"
+          KeyType: "HASH"         # HASH = Partition Key
+      BillingMode: PAY_PER_REQUEST # Good for unpredictable workloads/hackathons
+    DeletionPolicy: Retain
+
   KnowledgeBaseBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -354,17 +367,26 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Effect: Allow
+              - Effect: Allow # Permission to call Bedrock Haiku
                 Action: bedrock:InvokeModel
-                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-              - Effect: Allow
-                Action: aoss:APIAccessAll
-                Resource: !GetAtt OpenSearchCollection.Arn
-              - Effect: Allow
-                Action: ['dynamodb:Query', 'dynamodb:Scan']
+                Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0' # Specific model ARN
+              - Effect: Allow # Permissions for DynamoDB tables
+                Action:
+                  # Needed for NotificationHistoryTable
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  # Needed for UserInterestsTable
+                  - dynamodb:Query # Used in get_user_interests
+                  - dynamodb:Scan  # Used in lambda_handler to get all users
+                  # Needed for HackathonsTable
+                  - dynamodb:Scan  # Used in find_matching_hackathons
                 Resource:
                   - !GetAtt HackathonsTable.Arn
                   - !GetAtt UserInterestsTable.Arn
+                  - !GetAtt NotificationHistoryTable.Arn # Added NotificationHistoryTable ARN
+              - Effect: Allow # Permission to send messages to SQS
+                Action: sqs:SendMessage
+                Resource: !GetAtt ScoutResponseQueue.Arn # Added SQS Queue ARN
 
   TelegramHandlerRole:
     Type: AWS::IAM::Role
@@ -500,15 +522,22 @@ Resources:
     Properties:
       FunctionName: !Sub '${AWS::StackName}-NudgeAgent'
       Runtime: python3.11
-      Handler: nudge_agent.lambda_handler
+      Handler: nudge_agent.lambda_handler # Ensure nudge_agent.py is in the root of your deployment package
       Role: !GetAtt NudgeAgentRole.Arn
       Code:
-        # Code is deployed via deploy.py
+        # Code is deployed via deploy.py - This ZipFile is likely just a placeholder
         ZipFile: |
           def lambda_handler(event, context): return {'statusCode': 200, 'body': 'OK'}
       Timeout: 60
       Layers:
         - !Ref DependenciesLayer
+      # --- ADD THIS ENTIRE Environment BLOCK ---
+      Environment:
+        Variables:
+          USER_INTERESTS_TABLE: !Ref UserInterestsTable 
+          HACKATHONS_TABLE: !Ref HackathonsTable         
+          NOTIFICATION_HISTORY_TABLE: !Ref NotificationHistoryTable 
+          RESPONSE_QUEUE_URL: !Ref ScoutResponseQueue   
 
   TelegramHandlerFunction:
     Type: AWS::Lambda::Function
