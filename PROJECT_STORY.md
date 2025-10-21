@@ -46,10 +46,10 @@ FindAthon Prime is a fully deployed multi-agent AI system that revolutionizes ho
 
 ## Challenges we overcame
 
-**1. Strands mem0 Tool Integration Crisis**
-The biggest technical hurdle was discovering that Strands' `mem0_memory` tool doesn't properly integrate with AWS Bedrock models. The tool expected OpenAI-compatible responses but received different formats from Claude, causing JSON parsing failures and memory corruption.
+**1. Memory System Integration Crisis**
+The biggest technical hurdle was discovering that Strands' `mem0_memory` tool had compatibility issues with AWS Bedrock models, causing system failures and unreliable memory operations.
 
-*Solution*: We built a custom `mem0_json_memory` wrapper with multiple fallback strategies for JSON extraction, including regex patterns and validation loops.
+*Solution*: We abandoned mem0_memory and built custom memory tools using DynamoDB + OpenSearch Serverless with Bedrock Titan embeddings that Strands can reliably use, providing vector similarity search and persistent user preferences.
 
 **2. OpenSearch Serverless Security Maze**
 AWS OpenSearch Serverless has complex security policies that must be created in a specific order. We spent hours debugging CloudFormation failures due to policy dependencies and readonly property constraints.
@@ -83,7 +83,7 @@ Allowing AI-generated Python code to execute in production required careful sand
 
 **📊 Complete Deployment**: Delivered a fully operational system with working website, Telegram bot, deployment automation, and comprehensive documentation.
 
-**🔧 Framework Mastery**: Successfully integrated and deployed Strands framework with AWS Bedrock, solving compatibility issues in production.
+**🔧 Custom Solution Mastery**: When mem0_memory failed with Strands, built custom DynamoDB + OpenSearch memory tools that provide reliable persistent memory with vector similarity search in production.
 
 **🌐 Live Demo Website**: Created an interactive showcase website demonstrating all capabilities with integrated Telegram bot access.
 
@@ -103,7 +103,7 @@ Allowing AI-generated Python code to execute in production required careful sand
 
 **AI/ML Learnings**:
 - Different AI models excel at different tasks—Claude Sonnet for complex reasoning, Haiku for quick responses
-- Persistent memory across conversations requires careful data modeling
+- Persistent memory via vector embeddings requires careful OpenSearch integration
 - Tool-based AI agents are incredibly powerful when properly implemented
 - Grounding with knowledge bases prevents hallucination and improves reliability
 

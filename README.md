@@ -134,7 +134,8 @@ class ScoutAgent(Agent):
             http_request,                   # Web scraping
             self.save_extraction_tool,      # Code persistence
             self.execute_extraction_tool,   # Tool execution
-            mem0_memory                     # Persistent memory
+            self.store_user_preferences,    # Custom memory via OpenSearch
+            self.get_user_preferences       # Custom memory retrieval
         ]
         super().__init__(tools=tools, system_prompt=SYSTEM_PROMPT, model=model)
 ```
@@ -302,39 +303,41 @@ Serverless design optimizes resource usage and costs
 
 ## ⚡ Technical Challenges & Solutions
 
-### Strands mem0 Tool Integration Issue
+### Memory System Integration Challenge
 
-**Challenge**: The Strands framework's `mem0_memory` tool doesn't properly integrate with AWS Bedrock models, causing JSON parsing failures and inconsistent memory operations.
+**Challenge**: Initially attempted to use Strands' `mem0_memory` tool for persistent user memory, but encountered compatibility issues with AWS Bedrock models causing system failures.
 
-**Root Cause**: The mem0 tool expects OpenAI-compatible responses but AWS Bedrock Claude models return different response formats, leading to malformed JSON outputs.
+**Root Cause**: The `mem0_memory` tool had integration conflicts with Strands framework when using AWS Bedrock, leading to unreliable memory operations and JSON parsing errors.
 
-**Our Solution**: Custom wrapper implementation that ensures reliable memory operations:
+**Our Solution**: Built custom memory tools using DynamoDB + OpenSearch that Strands can reliably use:
 
 ```python
 @tool
-def mem0_json_memory(action: str, query: str = "", **kwargs) -> str:
-    """Wrapper that calls mem0_memory and ensures returned output is JSON only."""
-    raw = mem0_memory(action=action, query=query, **kwargs)
+def store_user_preferences(user_id: str, preference_text: str) -> str:
+    """Custom tool: Converts preferences to embeddings and stores in OpenSearch."""
+    # Generate embeddings using Bedrock Titan
+    response = bedrock_client.invoke_model(
+        modelId="amazon.titan-embed-text-v2:0",
+        body=json.dumps({"inputText": preference_text})
+    )
+    embedding = json.loads(response['body'].read())['embedding']
     
-    # Extract valid JSON from potentially malformed responses
-    try:
-        # Multiple fallback strategies for JSON extraction
-        if raw.startswith("{") or raw.startswith("["):
-            json.loads(raw)  # Validate
-            return raw
-        
-        # Extract JSON using regex patterns
-        matches = re.findall(r'\{(?:[^{}]|\{[^{}]*\})*\}', raw)
-        for match in matches:
-            json.loads(match)  # Validate
-            return match
-            
-    except Exception:
-        logger.error(f"mem0 JSON extraction failed: {raw}")
-        return json.dumps({"error": "invalid_model_output"})
+    # Store in OpenSearch with vector similarity
+    document = {
+        'user_id': user_id,
+        'preference_text': preference_text,
+        'preference_vector': embedding,
+        'timestamp': int(time.time())
+    }
+    os_client.index(index='user_preferences', body=document)
+
+@tool
+def get_user_preferences(user_id: str) -> str:
+    """Custom tool: Retrieves user preferences from OpenSearch."""
+    # Search and return user preferences
 ```
 
-**Impact**: This solution enables reliable persistent memory across conversations while maintaining compatibility with AWS Bedrock, showcasing our ability to solve complex integration challenges.
+**Impact**: This custom solution provides reliable persistent memory with vector similarity search, bypassing mem0_memory limitations while maintaining full Strands compatibility.
 
 ---
 
@@ -368,18 +371,17 @@ The system leverages 40+ pre-built tools:
 - `http_request`: Web scraping and API calls
 - `file_read/write`: Code persistence and caching
 - `use_aws`: Direct AWS service integration
-- `mem0_memory`: Persistent user memory
+- `store_user_preferences`: Persistent user memory via OpenSearch
 - Custom tools for hackathon-specific operations
 
 ### Memory & Context Management
 ```python
-# Persistent memory across conversations
-mem0_memory(action="store", query="user preferences", 
-           content="Interested in AI, blockchain, and fintech hackathons")
+# Persistent memory via OpenSearch
+store_user_preferences(user_id="user123", 
+                      preference_text="Interested in AI, blockchain, and fintech hackathons")
 
 # Contextual retrieval
-preferences = mem0_memory(action="retrieve", 
-                         query="user interests and hackathon preferences")
+preferences = get_user_preferences(user_id="user123")
 ```
 
 ---
