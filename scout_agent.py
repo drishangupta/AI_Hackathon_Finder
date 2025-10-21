@@ -32,7 +32,7 @@ Your first thought MUST be to analyze the user's raw message.
 - If the intent is `general_query` or `specific_url_check`:
     1.  Analyze its "freshness" and "feasibility." A query for "2026 hackathons" is for the distant future and likely has no results.
     2.  If the query seems unfeasible or for the distant future, you MUST NOT proceed to the main workflow.
-    3.  Instead, your ONLY action will be to call the `http_request` tool ONCE to perform a single web search (e.g., `http_request(url="https://www.google.com/search?q=2026+hackathons")`).
+    3.  Instead, your ONLY action will be to call the `http_request` tool ONCE to perform a single web search (e.g., http_request(url="https://www.google.com/search?q=<the user's original query text>")).
     4.  Analyze this single search result. If it confirms no data is available, you MUST report this to the user and then **STOP**.
     5.  Only if the query seems reasonable (e.g., "AI hackathons") OR your web search confirms results exist, you will state: 'Query is feasible. Proceeding to main workflow.' and then continue to Step 1.
     5.  Only if the search shows promise OR the query is for current data (e.g., "AI hackathons") should you proceed to Step 1.
@@ -49,14 +49,14 @@ Your first thought MUST be to classify the user's message into one of three cate
 **Path A: Handle Preference Update**
 If the intent is `preference_update`:
 1. Call `report_progress("Updating user preferences in memory...")`.
-2. Call `store_user_preferences(user_id="<user_id>", preference_text="<the user's new preference>")`.
+2. Call store_user_preferences(preference_text="<the user's new preference>").
 3. Then STOP. Your task is complete. Do not proceed to any other paths.
 
 ---
 **Path B: Handle General Query**
 If the intent is `general_query`:
 1. Call `report_progress("Starting general query...")`.
-2. **Your first action in this path MUST be to call `get_user_preferences()` to load context.**
+2. **Your first action in this path MUST be to take the user's original message and call get_user_preferences() to load context.**
 3. Call `report_progress("Getting list of trusted sources...")`.
 4. Call `get_trusted_sources()`. This returns a list of URLs.
 5. **Loop** through each URL from the list and follow the sub-workflow: "Process a Single URL".
@@ -65,7 +65,7 @@ If the intent is `general_query`:
 **Path C: Handle Specific URL Check**
 If the intent is `specific_url_check`:
 1. Call `report_progress("Starting specific URL check...")`.
-2. **Your first action in this path MUST be to call `get_user_preferences()` to load context.**
+2. **Your first action in this path MUST be to take the user's original message and call get_user_preferences() to load context.**
 3. Take the user's URL and follow the sub-workflow: "Process a Single URL".
 
 ---
@@ -424,23 +424,22 @@ class ScoutAgent(Agent):
     @tool
     def get_user_preferences(self) -> str:
         """
-        Retrieves the latest stored preference text for the user from OpenSearch
-        by searching for their user_id.
-
+        Retrieves ALL stored preference texts for the user from OpenSearch
+        and combines them into a single context string.
+        (This version does NOT use vector search).
         """
-        logger.info(f"--- GETTING PREFERENCE --- for self.user_id: '{self.user_id}'")
+        logger.info(f"--- GETTING ALL PREFERENCES --- for self.user_id: '{self.user_id}'")
         try:
-            # Define the search query
+            # Define the search query - get up to 100 docs, sort by time just in case
             search_body = {
-                "size": 1, # We only need the latest one
+                "size": 100,
                 "query": {
                     "term": {
-                        # Assumes your user_id field mapping is keyword or text with keyword subfield
                         "user_id.keyword": self.user_id
                     }
                 },
-                "sort": [
-                    {"timestamp": {"order": "desc"}} # Get the most recent document
+                "sort": [ # Optional: keeps order somewhat consistent
+                    {"timestamp": {"order": "desc"}}
                 ]
             }
 
@@ -452,31 +451,42 @@ class ScoutAgent(Agent):
 
             hits = response['hits']['hits']
             if hits:
-                # Extract the preference text from the latest document
-                preference_text = hits[0]['_source'].get('preference_text', '')
-                if preference_text:
-                    logger.info(f"Retrieved latest preferences for user {self.user_id}: {preference_text}")
-                    return f"SUCCESS: Found user preferences: {preference_text}"
+                # Extract the preference text from ALL documents found
+                all_prefs = []
+                for hit in hits:
+                    pref_text = hit['_source'].get('preference_text')
+                    if pref_text:
+                        all_prefs.append(pref_text.strip()) # Add strip() for cleanliness
+                
+                # Filter out empty strings just in case
+                all_prefs = [pref for pref in all_prefs if pref]
 
-            # If no hits or no text in the hit
+                if all_prefs:
+                    # Combine all non-empty preferences into a single string
+                    combined_prefs = "; ".join(all_prefs)
+                    logger.info(f"Retrieved combined preferences: {combined_prefs}")
+                    return f"SUCCESS: Found user preferences: {combined_prefs}"
+
+            # If no hits or no non-empty text in the hits
             logger.info(f"No preferences found for user {self.user_id}.")
             return "INFO: No preferences found for this user."
 
         except Exception as e:
-            # Handle potential index not found error during search gracefully
             if 'index_not_found_exception' in str(e):
-                 logger.info(f"Index 'user_preferences' not found for user {self.user_id}. No preferences stored yet.")
+                 logger.info(f"Index 'user_preferences' not found. No preferences stored yet.")
                  return "INFO: No preferences found for this user."
-
-            logger.error(f"ERROR retrieving user preferences for user {self.user_id}: {e}", exc_info=True)
+            logger.error(f"ERROR retrieving user preferences: {e}", exc_info=True)
             return f"ERROR: Could not retrieve user preferences: {e}"
     
     @tool
-    def store_user_preferences(self, user_id: str, preference_text: str) -> str:
-        """Converts user preferences to an embedding and stores it in OpenSearch."""
-        logger.info(f"--- STORING PREFERENCE --- for user_id: '{user_id}'")
+    def store_user_preferences(self, preference_text: str) -> str:
+        """
+        Converts user preference text to an embedding and stores it in OpenSearch
+        using the agent's internal user_id.
+        """
+        logger.info(f"--- STORING PREFERENCE --- for user_id: '{self.user_id}'")
         try:
-            logger.info(f"--- STORING PREFERENCE --- for user_id: '{user_id}'")
+            logger.info(f"--- STORING PREFERENCE --- for user_id: '{self.user_id}'")
             response = bedrock_client.invoke_model(
                 modelId="amazon.titan-embed-text-v2:0",
                 body=json.dumps({"inputText": preference_text})
@@ -484,7 +494,7 @@ class ScoutAgent(Agent):
             embedding = json.loads(response['body'].read())['embedding']
 
             document = {
-                'user_id': user_id,
+                'user_id': self.user_id,
                 'preference_text': preference_text,
                 'preference_vector': embedding,
                 'timestamp': int(time.time())
@@ -493,13 +503,13 @@ class ScoutAgent(Agent):
                 index='user_preferences',
                 body=document,
             )
-            return f"SUCCESS: Preferences for user {user_id} have been stored."
+            return f"SUCCESS: Preferences for user {self.user_id} have been stored."
         except Exception as e:
             logger.error(f"ERROR storing preferences: {e}")
             return f"ERROR: Failed to store preferences: {e}"
 
 
-# --- Main Execution Logic (Unchanged) ---
+
 # This part is correct. It's the entry point for the ECS container.
 if __name__ == "__main__":
     if 'USER_MESSAGE' in os.environ:
