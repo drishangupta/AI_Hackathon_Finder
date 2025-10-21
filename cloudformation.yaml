@@ -144,17 +144,17 @@ Resources:
   UserInterestsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub '${AWS::StackName}-UserInterests'
+      TableName: !Sub '${AWS::StackName}-UserInterests-v3'
       AttributeDefinitions:
-        - AttributeName: user_id
-          AttributeType: S
-        - AttributeName: hackathon_id
-          AttributeType: S
+        - AttributeName: "user_id"  # Partition Key
+          AttributeType: "S"
+        - AttributeName: "hackathon_id" # Sort Key
+          AttributeType: "S"
       KeySchema:
-        - AttributeName: user_id
-          KeyType: HASH
-        - AttributeName: hackathon_id
-          KeyType: RANGE
+        - AttributeName: "user_id"
+          KeyType: "HASH"
+        - AttributeName: "hackathon_id"
+          KeyType: "RANGE"
       BillingMode: PAY_PER_REQUEST
     DeletionPolicy: Retain
 
@@ -322,7 +322,7 @@ Resources:
                   - '*' # Simplified for hackathon
                   - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}'
               - Effect: Allow
-                Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:BatchWriteItem', 'dynamodb:Query', 'dynamodb:Scan']
+                Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:BatchWriteItem', 'dynamodb:Query', 'dynamodb:Scan','dynamodb:UpdateItem']
                 Resource:
                   - !GetAtt HackathonsTable.Arn
                   - !GetAtt ScraperFunctionsTable.Arn

@@ -25,6 +25,11 @@ You are equipped with a `shell` tool. If ANY tool call fails with a `ModuleNotFo
 you MUST immediately retry the original tool call that failed, and then continue the workflow.
 **Global Rule**
     You should call report_progress tool to keep the user in loop of whatever you are doing, you MUST tell the user what you are doing every 10 seconds. User MUST NOT wait more than 30 seconds, if he must,you should tell him that the current task might take a bit
+    If the user asks what hackathons they are currently tracking (e.g., "what am I tracking?", "show my tracked list"), you MUST call the `get_tracked_hackathons()` tool and report the result.
+    If the user expresses explicit interest in a specific hackathon that was previously mentioned (e.g., "track that one," "remind me about X," "I'm interested in the AI challenge"), you MUST:
+        1. Identify the unique `hackathon_id` and `title` of the hackathon they are referring to from the recent conversation context.
+        2. Call the `track_hackathon(hackathon_id="<the_id>", hackathon_title="<the_title>")` tool.
+        3. Confirm to the user that you are now tracking it.
 
 **Step 0: Pre-Run Query Analysis (Mandatory Sanity Check)**
 Your first thought MUST be to analyze the user's raw message.
@@ -77,6 +82,7 @@ This workflow is called by Path B or C for each URL.
     * If `not_found`, go to `Discover and Save`.
     * If `scraper` found, go to `Execute Scraper`.
     * If `api` found, get the `endpoint_url` and go to `Execute API`.
+
 3.  **Discover and Save:**
     * Call `http_request(url="<the_current_url>")` to get content.
     * **YOU** will analyze the content and formulate a strategy JSON (`{"api_found": ...}`).
@@ -142,7 +148,9 @@ class ScoutAgent(Agent):
             file_read,
             file_write,
             self.get_user_preferences,
-            shell
+            shell,
+            self.track_hackathon,
+            self.get_tracked_hackathons
         ]
         
         super().__init__(
@@ -229,6 +237,93 @@ class ScoutAgent(Agent):
             logger.error(f"ERROR reporting progress: {e}")
             return "Failed to report progress."
 
+    @tool
+    def track_hackathon(self, hackathon_id: str, hackathon_title: str, note: str = None) -> str:
+        """
+        Stores that the user is interested in a specific hackathon, optionally adding a note.
+        Use this when the user explicitly expresses interest in tracking a hackathon.
+        Provide the hackathon_id and title. A brief note can optionally be added.
+        """
+        logger.info(f"--- TRACKING HACKATHON --- User: {self.user_id}, Hackathon ID: {hackathon_id}, Note: {note}")
+        table_name = os.environ.get('USER_INTERESTS_TABLE')
+        if not table_name:
+            logger.error("USER_INTERESTS_TABLE env var not set. Cannot track hackathon.")
+            return "ERROR: Configuration error, cannot track hackathon."
+
+        try:
+            item_to_put = {
+                'user_id': {'S': self.user_id},
+                'hackathon_id': {'S': hackathon_id},
+                'hackathon_title': {'S': hackathon_title}, # Store title for easier retrieval
+                'tracked_timestamp': {'N': str(int(time.time()))} # Store when it was tracked
+            }
+            # Add the note only if provided
+            if note:
+                item_to_put['user_note'] = {'S': note}
+
+            dynamodb_client.put_item(
+                TableName=table_name,
+                Item=item_to_put
+            )
+            logger.info(f"Successfully tracked hackathon {hackathon_id} for user {self.user_id}")
+            response_message = f"SUCCESS: Now tracking '{hackathon_title}'."
+            if note:
+                response_message += f" Note added: '{note}'"
+            return response_message
+
+        except Exception as e:
+            logger.error(f"Error tracking hackathon {hackathon_id} for user {self.user_id}: {e}", exc_info=True)
+            return f"ERROR: Failed to track hackathon '{hackathon_title}': {str(e)}"
+    
+    @tool
+    def get_tracked_hackathons(self) -> str:
+        """
+        Retrieves the list of hackathons (ID, title, note, tracked date)
+        that the user is currently tracking.
+        Use this when the user asks "what hackathons am I tracking?".
+        """
+        logger.info(f"--- GETTING TRACKED HACKATHONS --- for user: {self.user_id}")
+        table_name = os.environ.get('USER_INTERESTS_TABLE')
+        if not table_name:
+            logger.error("USER_INTERESTS_TABLE env var not set. Cannot get tracked hackathons.")
+            return "ERROR: Configuration error, cannot retrieve tracked hackathons."
+
+        try:
+            # Query for all items matching the user_id (partition key)
+            response = dynamodb_client.query(
+                TableName=table_name,
+                KeyConditionExpression="user_id = :uid",
+                ExpressionAttributeValues={
+                    ":uid": {'S': self.user_id}
+                },
+                # Request specific attributes to retrieve
+                ProjectionExpression="hackathon_id, hackathon_title, user_note, tracked_timestamp"
+            )
+
+            items = response.get('Items', [])
+
+            if items:
+                tracked_list = []
+                for item in items:
+                    hackathon_info = {
+                        "id": item.get('hackathon_id', {}).get('S', 'N/A'),
+                        "title": item.get('hackathon_title', {}).get('S', 'N/A'),
+                        "note": item.get('user_note', {}).get('S', None), # Include the note
+                        "tracked_since": int(item.get('tracked_timestamp', {}).get('N', '0')) # Include timestamp
+                    }
+                    tracked_list.append(hackathon_info)
+
+                logger.info(f"Found {len(tracked_list)} tracked hackathons for user {self.user_id}")
+                # Return a JSON list of dictionaries for clarity
+                return f"SUCCESS: You are tracking the following hackathons: {json.dumps(tracked_list, indent=2)}"
+            else:
+                logger.info(f"User {self.user_id} is not tracking any hackathons.")
+                return "INFO: You are not currently tracking any hackathons."
+
+        except Exception as e:
+            logger.error(f"Error getting tracked hackathons for user {self.user_id}: {e}", exc_info=True)
+            return f"ERROR: Failed to retrieve tracked hackathons: {str(e)}"
+    
     @tool
     def get_trusted_sources(self) -> str:
         """Gets a list of trusted hackathon websites from the Bedrock Knowledge Base."""
