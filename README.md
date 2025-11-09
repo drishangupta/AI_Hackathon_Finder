@@ -1,3 +1,5 @@
+#DELETED OPENSEARCH SERVERLESS SERVICE WITHOUT ANYCHANGES. IT COSTED A FOTUNE. WILL FIX LATER 
+
 # 🎯 FindAthon Prime
 **Deployed Multi-Agent AI System for Autonomous Hackathon Discovery**
 
